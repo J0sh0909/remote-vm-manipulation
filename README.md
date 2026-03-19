@@ -6,15 +6,15 @@ A cross-hypervisor VM orchestration CLI built in Go.
 
 ## Features
 
-- **VM lifecycle management** — start, stop, suspend, reset, and query power state
-- **Parallel folder operations** — target all VMs in a VMware folder with `-f <folder>`, running eligible operations concurrently
-- **Guest exec with OS auto-detection** — run commands inside VMs; interpreter is inferred from the VMX `guestOS` key (Linux → `/bin/bash`, Windows → `cmd.exe`)
-- **Snapshot management** — create (with duplicate detection), list, revert, and delete snapshots; running VMs are suspended automatically before capture
-- **OVF/OVA archive pipeline** — export and import VMs via `ovftool` with per-VM mpb progress bars; versioned directory layout under `ARCHIVE_PATH`
-- **Hardware configuration** — edit CPU, RAM, NIC, disk, CD/DVD, and display settings with host-resource validation
-- **Structured error codes** — every failure prints a `[VMxxx]` code; `vmctl errors` lists all codes and descriptions
-- **GitHub Actions pipeline** — trigger any vmctl command against a self-hosted runner via `workflow_dispatch`
-- **Cross-platform host support** — compiles and runs on both Windows and Linux hosts; host resource detection, VMware process management, and ovftool lookup all adapt automatically to the host OS
+- **VM lifecycle management** -start, stop, suspend, reset, and query power state
+- **Parallel folder operations** -target all VMs in a VMware folder with `-f <folder>`, running eligible operations concurrently
+- **Guest exec with OS auto-detection** -run commands inside VMs; interpreter is inferred from the VMX `guestOS` key (Linux -> `/bin/bash`, Windows -> `cmd.exe`)
+- **Snapshot management** -create (with duplicate detection), list, revert, and delete snapshots; running VMs are suspended automatically before capture
+- **OVF/OVA archive pipeline** -export and import VMs via `ovftool` with per-VM mpb progress bars; versioned directory layout under `ARCHIVE_PATH`
+- **Hardware configuration** -edit CPU, RAM, NIC, disk, CD/DVD, and display settings with host-resource validation
+- **Structured error codes** -every failure prints a `[VMxxx]` code; `vmctl errors` lists all codes and descriptions
+- **GitHub Actions pipeline** -trigger any vmctl command against a self-hosted runner via `workflow_dispatch`
+- **Cross-platform host support** -compiles and runs on both Windows and Linux hosts; host resource detection, VMware process management, and ovftool lookup all adapt automatically to the host OS
 
 ---
 
@@ -31,7 +31,7 @@ A cross-hypervisor VM orchestration CLI built in Go.
 
 - Go 1.23+
 - VMware Workstation with `vmrun`, `vmware-vdiskmanager`, and `ovftool` available (`.exe` on Windows, no extension on Linux)
-- Guest credentials for `exec` — use any existing account or provision a dedicated one with the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script (recommended)
+- Guest credentials for `exec` -use any existing account or provision a dedicated one with the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script (recommended)
 
 ---
 
@@ -41,7 +41,7 @@ The `exec` command requires guest OS credentials to run commands inside VMs. You
 
 **Provisioning a dedicated automation user (recommended)**
 
-Use the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) companion script to create a `runner` account purpose-built for automation. The script must be executed with administrator privileges **directly inside each guest VM** — as `root` on Linux or in an elevated PowerShell session on Windows. It creates a `runner` user with a password you define and grants it escalated privileges (`sudo` on Linux, local administrator on Windows).
+Use the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) companion script to create a `runner` account purpose-built for automation. The script must be executed with administrator privileges **directly inside each guest VM** -as `root` on Linux or in an elevated PowerShell session on Windows. It creates a `runner` user with a password you define and grants it escalated privileges (`sudo` on Linux, local administrator on Windows).
 
 Once provisioned, add the following to your `.env` and all `exec` commands work without flags:
 
@@ -53,10 +53,10 @@ VM_DEFAULT_PASS=<password chosen during bootstrap>
 **Usage patterns**
 
 ```
-# Explicit flags — works with any existing account, no .env required
+# Explicit flags -works with any existing account, no .env required
 vmctl exec MyVM "hostname" --user USER --pass PASSWORD
 
-# .env defaults — after bootstrap, no flags needed
+# .env defaults -after bootstrap, no flags needed
 vmctl exec MyVM "hostname"
 
 # Folder-wide with .env defaults
@@ -119,7 +119,7 @@ go install .
 
 ## Usage (VMware Workstation)
 
-> The commands below are specific to the VMware Workstation backend. When additional backends are implemented, the same command surface works identically — the `Hypervisor` interface abstracts all backend differences, so only the `.env` configuration changes.
+> The commands below are specific to the VMware Workstation backend. When additional backends are implemented, the same command surface works identically -the `Hypervisor` interface abstracts all backend differences, so only the `.env` configuration changes.
 
 ```
 # List all VMs grouped by folder
@@ -179,7 +179,7 @@ vmctl errors
 
 ### Running via GitHub Actions
 
-When using the pipeline, enter only the command and its arguments in the workflow input — not the `vmctl` prefix. The workflow prepends the binary path automatically.
+When using the pipeline, enter only the command and its arguments in the workflow input -not the `vmctl` prefix. The workflow prepends the binary path automatically.
 
 | Context | What you type |
 |---|---|
@@ -190,7 +190,7 @@ When using the pipeline, enter only the command and its arguments in the workflo
 # Local
 vmctl exec --folder MyFolder "hostname" --user USER --pass PASSWORD
 
-# Workflow input field (Actions → vmctl → Run workflow)
+# Workflow input field (Actions -> vmctl -> Run workflow)
 exec --folder MyFolder "hostname" --user USER --pass PASSWORD
 ```
 
@@ -210,9 +210,9 @@ Adding a new hypervisor backend requires implementing the `Hypervisor` interface
 
 vmctl ships a `workflow_dispatch` GitHub Actions workflow (`.github/workflows/vmctl.yml`) that runs on a self-hosted Windows runner co-located with the VMware Workstation host.
 
-The workflow has no checkout or build steps — it executes a pre-built `C:\actions-runner\vmctl.exe` directly, making dispatch-to-execution near-instant. The `.env` file lives at `C:\actions-runner\.env` on the runner machine and is never committed to the repository.
+The workflow has no checkout or build steps -it executes a pre-built `C:\actions-runner\vmctl.exe` directly, making dispatch-to-execution near-instant. The `.env` file lives at `C:\actions-runner\.env` on the runner machine and is never committed to the repository.
 
-To use: go to **Actions → vmctl → Run workflow**, enter a vmctl command (e.g. `start MyVM`), and click **Run**.
+To use: go to **Actions -> vmctl -> Run workflow**, enter a vmctl command (e.g. `start MyVM`), and click **Run**.
 
 ---
 
