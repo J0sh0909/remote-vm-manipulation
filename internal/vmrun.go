@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -190,17 +191,32 @@ func ValidateGfxMem(host HostResources, requestedMB int) error {
 	return nil
 }
 
-// ValidateDiskSpace checks free space on the drive containing the VM.
+// ValidateDiskSpace checks free space on the drive or mount point containing the VM.
 func ValidateDiskSpace(host HostResources, vmxPath string, requestedGB int) error {
 	if len(host.FreeDiskGB) == 0 {
 		return nil
 	}
-	// Extract drive letter from vmx path (e.g., "C:" from "C:\Users\...")
-	if len(vmxPath) >= 2 && vmxPath[1] == ':' {
-		drive := strings.ToUpper(vmxPath[:2])
-		if free, ok := host.FreeDiskGB[drive]; ok {
-			if requestedGB > free {
-				return fmt.Errorf("requested %d GB disk exceeds free space on %s (%d GB free)", requestedGB, drive, free)
+	if runtime.GOOS == "windows" {
+		// Extract drive letter from vmx path (e.g., "C:" from "C:\Users\...")
+		if len(vmxPath) >= 2 && vmxPath[1] == ':' {
+			drive := strings.ToUpper(vmxPath[:2])
+			if free, ok := host.FreeDiskGB[drive]; ok {
+				if requestedGB > free {
+					return fmt.Errorf("requested %d GB disk exceeds free space on %s (%d GB free)", requestedGB, drive, free)
+				}
+			}
+		}
+	} else {
+		// Find the longest mount point that is a prefix of vmxPath.
+		best := ""
+		for mp := range host.FreeDiskGB {
+			if strings.HasPrefix(vmxPath, mp) && len(mp) > len(best) {
+				best = mp
+			}
+		}
+		if best != "" {
+			if free := host.FreeDiskGB[best]; requestedGB > free {
+				return fmt.Errorf("requested %d GB disk exceeds free space on %s (%d GB free)", requestedGB, best, free)
 			}
 		}
 	}

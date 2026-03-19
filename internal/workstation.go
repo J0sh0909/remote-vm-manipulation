@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -419,7 +420,11 @@ func (w *WorkstationBackend) FindOvftool() (string, error) {
 	if p, err := exec.LookPath("ovftool"); err == nil {
 		return p, nil
 	}
-	candidate := filepath.Join(filepath.Dir(w.s.VmrunPath), "OVFTool", "ovftool.exe")
+	ovftoolBin := "ovftool"
+	if runtime.GOOS == "windows" {
+		ovftoolBin = "ovftool.exe"
+	}
+	candidate := filepath.Join(filepath.Dir(w.s.VmrunPath), "OVFTool", ovftoolBin)
 	if _, err := os.Stat(candidate); err == nil {
 		return candidate, nil
 	}
