@@ -227,4 +227,4 @@ To use: go to **Actions → vmctl → Run workflow**, enter a vmctl command (e.g
 
 ## License
 
-MIT License — Copyright 2026 J0sh0909
+MIT License - Copyright 2026 J0sh0909
