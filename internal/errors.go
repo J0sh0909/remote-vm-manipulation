@@ -30,6 +30,7 @@ const (
 	ErrDisplayConfig = "VM205"
 	ErrOSConfig      = "VM206"
 	ErrCDVDConfig    = "VM207"
+	ErrTPMConfig     = "VM208"
 
 	// VM3xx — exec/guest operations
 	ErrExec            = "VM300"
@@ -98,6 +99,7 @@ var ErrorCodes = []ErrorRef{
 	{ErrDisplayConfig, "display config failed"},
 	{ErrOSConfig, "OS config failed"},
 	{ErrCDVDConfig, "CD/DVD config failed"},
+	{ErrTPMConfig, "TPM config failed"},
 
 	{ErrExec, "generic exec/guest operation error"},
 	{ErrGuestOSNotDet, "guest OS not detected"},

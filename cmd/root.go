@@ -65,6 +65,9 @@ var (
 	bootstrapPassFlag      string
 	bootstrapRunnerUserFlag string
 	bootstrapRunnerPassFlag string
+	vpFlag                  string
+	tpmEncryptionPassFlag   string
+	tpmEncryptAllFlag       bool
 )
 
 // ---------------------------------------------------------------------------
@@ -83,6 +86,9 @@ func requireSettings() {
 		settings, hvErr = internal.LoadSettings()
 		if hvErr != nil {
 			return
+		}
+		if vpFlag != "" {
+			settings.EncryptionPass = vpFlag
 		}
 		hv, hvErr = internal.NewHypervisor(settings)
 	})
@@ -779,7 +785,7 @@ func bootstrapRunLinux(vm internal.VM, user, pass, linuxInner, successMsg string
 // bootstrapWindowsCreate provisions the runner user on a Windows guest using
 // pure cmd.exe commands — no PowerShell or script download required.
 func bootstrapWindowsCreate(vm internal.VM, user, pass, ru, rp string) powerResult {
-	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add /fullname:"Automation Runner" /comment:"VM automation user"`); err != nil {
+	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add`); err != nil {
 		return powerResult{vm.Name, internal.ErrBootstrapWindows, "create user failed: " + err.Error()}
 	}
 	// Add to local Administrators group; fall back to French locale name if needed.
@@ -2036,6 +2042,97 @@ var configOsCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
+// config tpm
+// ---------------------------------------------------------------------------
+
+var configTpmCmd = &cobra.Command{
+	Use:   "tpm [vm-names...]",
+	Short: "Show TPM status for a VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+
+		for _, vm := range targets {
+			data, err := internal.ParseVMXKeys(vm.Path)
+			if err != nil {
+				internal.LogError(internal.ErrTPMConfig, vm.Name, "%s", err)
+				continue
+			}
+			vtpmPresent := strings.EqualFold(data["vtpm.present"], "TRUE")
+			if !vtpmPresent {
+				fmt.Printf("%s → TPM: not present\n", vm.Name)
+				continue
+			}
+			encType := "select files"
+			if strings.EqualFold(data["encryption.encryptedvmx"], "TRUE") {
+				encType = "full VM"
+			}
+			fmt.Printf("%s → TPM: present (encryption: %s)\n", vm.Name, encType)
+		}
+	},
+}
+
+var configTpmAddCmd = &cobra.Command{
+	Use:   "add [vm-names...]",
+	Short: "Add a virtual TPM to a VM (requires encryption)",
+	Run: func(cmd *cobra.Command, args []string) {
+		if tpmEncryptionPassFlag == "" {
+			fmt.Println("--encryption-pass is required (VMware requires encryption for TPM)")
+			return
+		}
+
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+
+		for _, vm := range targets {
+			if !requireOff(vm, "tpm") {
+				continue
+			}
+			keys := map[string]string{
+				"managedvm.autoAddVTPM": "software",
+				"vtpm.present":         "TRUE",
+			}
+			if tpmEncryptAllFlag {
+				keys["encryption.encryptedvmx"] = "TRUE"
+			}
+			for k, v := range keys {
+				if err := internal.SetVMXKey(vm.Path, k, v); err != nil {
+					internal.LogError(internal.ErrTPMConfig, vm.Name, "%s", err)
+					continue
+				}
+			}
+			encDesc := "select files"
+			if tpmEncryptAllFlag {
+				encDesc = "full VM"
+			}
+			internal.LogInfo(vm.Name, "TPM added (encryption: %s, password set via --encryption-pass)", encDesc)
+		}
+	},
+}
+
+var configTpmRemoveCmd = &cobra.Command{
+	Use:   "remove [vm-names...]",
+	Short: "Remove the virtual TPM from a VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+
+		for _, vm := range targets {
+			if !requireOff(vm, "tpm") {
+				continue
+			}
+			for _, key := range []string{"managedvm.autoAddVTPM", "vtpm.present", "encryption.encryptedvmx"} {
+				_ = internal.RemoveVMXKey(vm.Path, key)
+			}
+			internal.LogInfo(vm.Name, "TPM removed")
+		}
+	},
+}
+
+// ---------------------------------------------------------------------------
 // networks
 // ---------------------------------------------------------------------------
 
@@ -2512,6 +2609,9 @@ func init() {
 	configCmd.AddCommand(configCdromCmd)
 	configCmd.AddCommand(configDisplayCmd)
 	configCmd.AddCommand(configOsCmd)
+	configCmd.AddCommand(configTpmCmd)
+	configTpmCmd.AddCommand(configTpmAddCmd)
+	configTpmCmd.AddCommand(configTpmRemoveCmd)
 
 	// Disk subcommands
 	configDiskCmd.AddCommand(configDiskAddCmd)
@@ -2532,6 +2632,7 @@ func init() {
 		startCmd, stopCmd, suspendCmd, resetCmd, restartCmd, execCmd, infoCmd,
 		bootstrapCmd, bootstrapCreateCmd, bootstrapVerifyCmd, bootstrapResetCmd, bootstrapRevokeCmd,
 		configCpuCmd, configRamCmd, configNicCmd, configDisplayCmd, configOsCmd,
+		configTpmCmd, configTpmAddCmd, configTpmRemoveCmd,
 		configDiskAddCmd, configDiskRemoveCmd, configDiskExpandCmd,
 		configDiskDefragCmd, configDiskCompactCmd,
 		configCdromMountCmd, configCdromUnmountCmd, configCdromBootCmd,
@@ -2630,10 +2731,17 @@ func init() {
 	// OS
 	configOsCmd.Flags().StringVarP(&osSetFlag, "set", "s", "", "guestOS value to write into the VMX")
 
+	// TPM
+	configTpmAddCmd.Flags().StringVar(&tpmEncryptionPassFlag, "encryption-pass", "", "VM encryption password (required)")
+	configTpmAddCmd.Flags().BoolVar(&tpmEncryptAllFlag, "encrypt-all", false, "Encrypt all VM files (default: select files only)")
+
 	// Exec
 	execCmd.Flags().StringVarP(&execUserFlag, "user", "u", "", "Guest OS username (required)")
 	execCmd.Flags().StringVarP(&execPassFlag, "pass", "p", "", "Guest OS password (required)")
 	execCmd.Flags().StringVarP(&execInterpreterFlag, "interpreter", "i", "", "Script interpreter (e.g. /bin/bash, C:\\Windows\\System32\\cmd.exe; default: auto-detect)")
+
+	// VM encryption password (global)
+	rootCmd.PersistentFlags().StringVar(&vpFlag, "vp", "", "VM encryption password (overrides VM_ENCRYPTION_PASS from .env)")
 
 	// Bootstrap — persistent flags shared by all subcommands
 	bootstrapCmd.PersistentFlags().StringVarP(&bootstrapUserFlag, "user", "u", "", "Guest OS username with admin/root privileges")

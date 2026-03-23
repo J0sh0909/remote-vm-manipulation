@@ -76,6 +76,7 @@ var RequiresPowerOff = map[string]bool{
 	"disk-defrag":  true,
 	"disk-compact": true,
 	"display":      true,
+	"tpm":          true,
 	"revert":       true,
 	"export":       true,
 }
