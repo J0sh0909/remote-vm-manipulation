@@ -25,6 +25,7 @@ type Settings struct {
 	AWSRegion      string
 	AWSKeyDir      string
 	RiftStatePath  string
+	QemuImgPath    string
 }
 
 // HostResources holds detected host hardware limits
@@ -60,6 +61,7 @@ func LoadSettings() (Settings, error) {
 		AWSRegion:      os.Getenv("AWS_REGION"),
 		AWSKeyDir:      os.Getenv("AWS_KEY_DIR"),
 		RiftStatePath:  os.Getenv("RIFT_STATE_PATH"),
+		QemuImgPath:    os.Getenv("QEMU_IMG_PATH"),
 	}
 
 	if s.VmrunPath == "" || s.VmDirectory == "" || s.VmInventory == "" || s.NetmapPath == "" || s.IsoDirectory == "" || s.VdiskPath == "" {

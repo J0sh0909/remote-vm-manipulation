@@ -215,6 +215,90 @@ var listCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
+// overview
+// ---------------------------------------------------------------------------
+
+var overviewCmd = &cobra.Command{
+	Use:   "overview",
+	Short: "Show VMs across all detected hypervisors and AWS",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		total := 0
+
+		// --- VMware Workstation ---
+		if s, err := internal.LoadSettings(); err == nil {
+			if h, err := internal.NewHypervisor(s); err == nil {
+				if vms, err := h.GetPowerState(); err == nil && len(vms) > 0 {
+					fmt.Println("VMware Workstation")
+					fmt.Println(strings.Repeat("-", 40))
+					for _, vm := range vms {
+						state := "off"
+						if vm.Running {
+							state = "running"
+						}
+						fmt.Printf("  %-30s %s\n", vm.Name, state)
+					}
+					total += len(vms)
+					fmt.Println()
+				}
+			}
+		}
+
+		// --- VirtualBox ---
+		if vboxVMs, err := internal.DetectVBoxVMs(); err == nil && len(vboxVMs) > 0 {
+			fmt.Println("VirtualBox")
+			fmt.Println(strings.Repeat("-", 40))
+			for _, vm := range vboxVMs {
+				fmt.Printf("  %-30s %s\n", vm.Name, vm.State)
+			}
+			total += len(vboxVMs)
+			fmt.Println()
+		}
+
+		// --- Hyper-V ---
+		if hvVMs, err := internal.DetectHyperVVMs(); err == nil && len(hvVMs) > 0 {
+			fmt.Println("Hyper-V")
+			fmt.Println(strings.Repeat("-", 40))
+			for _, vm := range hvVMs {
+				fmt.Printf("  %-30s %s\n", vm.Name, internal.HyperVStateName(vm.State))
+			}
+			total += len(hvVMs)
+			fmt.Println()
+		}
+
+		// --- AWS EC2 ---
+		awsS, _ := internal.LoadSettings()
+		region := awsS.AWSRegion
+		if ab, err := internal.NewAWSBackend(region); err == nil {
+			if instances, err := ab.ListInstances(false); err == nil && len(instances) > 0 {
+				fmt.Println("AWS EC2")
+				fmt.Println(strings.Repeat("-", 80))
+				fmt.Printf("  %-20s %-12s %-12s %s\n", "NAME", "STATE", "TYPE", "PUBLIC IP")
+				for _, i := range instances {
+					name := i.Name
+					if name == "" {
+						name = i.ID
+					}
+					pub := i.PublicIP
+					if pub == "" {
+						pub = "-"
+					}
+					fmt.Printf("  %-20s %-12s %-12s %s\n", name, i.State, i.Type, pub)
+				}
+				total += len(instances)
+				fmt.Println()
+			}
+		}
+
+		if total == 0 {
+			fmt.Println("No VMs detected across any provider.")
+		} else {
+			fmt.Printf("Total: %d VM(s)\n", total)
+		}
+	},
+}
+
+// ---------------------------------------------------------------------------
 // info
 // ---------------------------------------------------------------------------
 
@@ -1416,10 +1500,16 @@ var archiveExportCmd = &cobra.Command{
 			if folderPart == "." {
 				folderPart = ""
 			}
+			// Determine hypervisor identifier for archive naming.
+			hvID := "vmw" // default — VMware Workstation
+			if settings.Hypervisor == "proxmox" {
+				hvID = "pve"
+			}
+
 			var destPath, dir string
 			switch format {
 			case "ovf":
-				versionDir := label + "-" + ts
+				versionDir := label + "-" + hvID + "-" + ts
 				if folderPart != "" {
 					dir = filepath.Join(settings.ArchivePath, "OVF", folderPart, label, versionDir)
 				} else {
@@ -1440,7 +1530,7 @@ var archiveExportCmd = &cobra.Command{
 					internal.LogError(internal.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
 					return "", false
 				}
-				destPath = filepath.Join(dir, label+"-"+ts+".ova")
+				destPath = filepath.Join(dir, label+"-"+hvID+"-"+ts+".ova")
 			}
 			return destPath, true
 		}
@@ -2569,6 +2659,7 @@ func Execute() {
 func init() {
 	// Top-level commands
 	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(overviewCmd)
 	rootCmd.AddCommand(infoCmd)
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)

@@ -77,6 +77,13 @@ const (
 	ErrAWSStartFailed  = "VM803"
 	ErrAWSStopFailed   = "VM804"
 	ErrAWSTermFailed   = "VM805"
+
+	// VM9xx — migration operations
+	ErrMigration     = "VM900"
+	ErrDiskConvertMig = "VM901"
+	ErrSourceNotFound = "VM902"
+	ErrQemuImgNotFound = "VM903"
+	ErrTargetHypervisor = "VM904"
 )
 
 // ---------------------------------------------------------------------------
@@ -148,6 +155,12 @@ var ErrorCodes = []ErrorRef{
 	{ErrAWSStartFailed, "EC2 start failed"},
 	{ErrAWSStopFailed, "EC2 stop failed"},
 	{ErrAWSTermFailed, "EC2 terminate failed"},
+
+	{ErrMigration, "generic migration error"},
+	{ErrDiskConvertMig, "disk conversion failed"},
+	{ErrSourceNotFound, "source VM not found"},
+	{ErrQemuImgNotFound, "qemu-img not found"},
+	{ErrTargetHypervisor, "target hypervisor error"},
 }
 
 // ---------------------------------------------------------------------------
