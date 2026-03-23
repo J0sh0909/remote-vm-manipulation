@@ -22,6 +22,7 @@ type Settings struct {
 	DefaultUser    string
 	DefaultPass    string
 	EncryptionPass string
+	AWSRegion      string
 }
 
 // HostResources holds detected host hardware limits
@@ -54,6 +55,7 @@ func LoadSettings() (Settings, error) {
 		DefaultUser:    os.Getenv("VM_DEFAULT_USER"),
 		DefaultPass:    os.Getenv("VM_DEFAULT_PASS"),
 		EncryptionPass: os.Getenv("VM_ENCRYPTION_PASS"),
+		AWSRegion:      os.Getenv("AWS_REGION"),
 	}
 
 	if s.VmrunPath == "" || s.VmDirectory == "" || s.VmInventory == "" || s.NetmapPath == "" || s.IsoDirectory == "" || s.VdiskPath == "" {

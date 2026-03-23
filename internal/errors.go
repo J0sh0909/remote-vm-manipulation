@@ -69,6 +69,14 @@ const (
 	ErrVMXKeyNotFound = "VM702"
 	ErrFileNotFound   = "VM703"
 	ErrPermDenied     = "VM704"
+
+	// VM8xx — AWS operations
+	ErrAWS             = "VM800"
+	ErrAWSNotFound     = "VM801"
+	ErrAWSCreateFailed = "VM802"
+	ErrAWSStartFailed  = "VM803"
+	ErrAWSStopFailed   = "VM804"
+	ErrAWSTermFailed   = "VM805"
 )
 
 // ---------------------------------------------------------------------------
@@ -133,6 +141,13 @@ var ErrorCodes = []ErrorRef{
 	{ErrVMXKeyNotFound, "VMX key not found"},
 	{ErrFileNotFound, "file not found"},
 	{ErrPermDenied, "permission denied"},
+
+	{ErrAWS, "generic AWS error"},
+	{ErrAWSNotFound, "EC2 instance not found"},
+	{ErrAWSCreateFailed, "EC2 create failed"},
+	{ErrAWSStartFailed, "EC2 start failed"},
+	{ErrAWSStopFailed, "EC2 stop failed"},
+	{ErrAWSTermFailed, "EC2 terminate failed"},
 }
 
 // ---------------------------------------------------------------------------
