@@ -30,6 +30,7 @@ const (
 	ErrDisplayConfig = "VM205"
 	ErrOSConfig      = "VM206"
 	ErrCDVDConfig    = "VM207"
+	ErrTPMConfig     = "VM208"
 
 	// VM3xx — exec/guest operations
 	ErrExec            = "VM300"
@@ -68,6 +69,21 @@ const (
 	ErrVMXKeyNotFound = "VM702"
 	ErrFileNotFound   = "VM703"
 	ErrPermDenied     = "VM704"
+
+	// VM8xx — AWS operations
+	ErrAWS             = "VM800"
+	ErrAWSNotFound     = "VM801"
+	ErrAWSCreateFailed = "VM802"
+	ErrAWSStartFailed  = "VM803"
+	ErrAWSStopFailed   = "VM804"
+	ErrAWSTermFailed   = "VM805"
+
+	// VM9xx — migration operations
+	ErrMigration     = "VM900"
+	ErrDiskConvertMig = "VM901"
+	ErrSourceNotFound = "VM902"
+	ErrQemuImgNotFound = "VM903"
+	ErrTargetHypervisor = "VM904"
 )
 
 // ---------------------------------------------------------------------------
@@ -98,6 +114,7 @@ var ErrorCodes = []ErrorRef{
 	{ErrDisplayConfig, "display config failed"},
 	{ErrOSConfig, "OS config failed"},
 	{ErrCDVDConfig, "CD/DVD config failed"},
+	{ErrTPMConfig, "TPM config failed"},
 
 	{ErrExec, "generic exec/guest operation error"},
 	{ErrGuestOSNotDet, "guest OS not detected"},
@@ -131,6 +148,19 @@ var ErrorCodes = []ErrorRef{
 	{ErrVMXKeyNotFound, "VMX key not found"},
 	{ErrFileNotFound, "file not found"},
 	{ErrPermDenied, "permission denied"},
+
+	{ErrAWS, "generic AWS error"},
+	{ErrAWSNotFound, "EC2 instance not found"},
+	{ErrAWSCreateFailed, "EC2 create failed"},
+	{ErrAWSStartFailed, "EC2 start failed"},
+	{ErrAWSStopFailed, "EC2 stop failed"},
+	{ErrAWSTermFailed, "EC2 terminate failed"},
+
+	{ErrMigration, "generic migration error"},
+	{ErrDiskConvertMig, "disk conversion failed"},
+	{ErrSourceNotFound, "source VM not found"},
+	{ErrQemuImgNotFound, "qemu-img not found"},
+	{ErrTargetHypervisor, "target hypervisor error"},
 }
 
 // ---------------------------------------------------------------------------

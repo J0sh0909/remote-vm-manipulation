@@ -10,17 +10,22 @@ import (
 )
 
 type Settings struct {
-	VmrunPath    string
-	VmDirectory  string
-	VmInventory  string
-	NetmapPath   string
-	IsoDirectory string
-	VdiskPath    string
-	ArchivePath  string
-	LogPath      string
-	Hypervisor   string
-	DefaultUser  string
-	DefaultPass  string
+	VmrunPath      string
+	VmDirectory    string
+	VmInventory    string
+	NetmapPath     string
+	IsoDirectory   string
+	VdiskPath      string
+	ArchivePath    string
+	LogPath        string
+	Hypervisor     string
+	DefaultUser    string
+	DefaultPass    string
+	EncryptionPass string
+	AWSRegion      string
+	AWSKeyDir      string
+	RiftStatePath  string
+	QemuImgPath    string
 }
 
 // HostResources holds detected host hardware limits
@@ -50,8 +55,13 @@ func LoadSettings() (Settings, error) {
 		ArchivePath:  os.Getenv("ARCHIVE_PATH"),
 		LogPath:      os.Getenv("LOG_PATH"),
 		Hypervisor:   os.Getenv("HYPERVISOR"),
-		DefaultUser:  os.Getenv("VM_DEFAULT_USER"),
-		DefaultPass:  os.Getenv("VM_DEFAULT_PASS"),
+		DefaultUser:    os.Getenv("VM_DEFAULT_USER"),
+		DefaultPass:    os.Getenv("VM_DEFAULT_PASS"),
+		EncryptionPass: os.Getenv("VM_ENCRYPTION_PASS"),
+		AWSRegion:      os.Getenv("AWS_REGION"),
+		AWSKeyDir:      os.Getenv("AWS_KEY_DIR"),
+		RiftStatePath:  os.Getenv("RIFT_STATE_PATH"),
+		QemuImgPath:    os.Getenv("QEMU_IMG_PATH"),
 	}
 
 	if s.VmrunPath == "" || s.VmDirectory == "" || s.VmInventory == "" || s.NetmapPath == "" || s.IsoDirectory == "" || s.VdiskPath == "" {

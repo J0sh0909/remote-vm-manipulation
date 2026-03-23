@@ -18,11 +18,48 @@ import (
 // WorkstationBackend implements Hypervisor using VMware Workstation (vmrun).
 type WorkstationBackend struct {
 	s Settings
+
+	// hostnameCache maps vmxPath → cached Windows computer name.
+	// Populated lazily on first auth retry for each VM.
+	hostnameMu    sync.Mutex
+	hostnameCache map[string]string
 }
 
 // ---------------------------------------------------------------------------
 // vmrun wrapper (private)
 // ---------------------------------------------------------------------------
+
+// isEncryptedVM checks the VMX file for encryption markers (vtpm or encryption keys).
+func isEncryptedVM(vmxPath string) bool {
+	data, err := ParseVMXKeys(vmxPath)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(data["vtpm.present"], "TRUE") {
+		return true
+	}
+	if strings.EqualFold(data["encryption.encryptedvmx"], "TRUE") {
+		return true
+	}
+	if _, ok := data["encryption.keysafe"]; ok {
+		return true
+	}
+	return false
+}
+
+// vpArgsForVM returns the -vp <password> prefix if the VM is encrypted and a
+// password is configured. Prints a warning to stderr if encrypted but no
+// password is available. Returns nil for non-encrypted VMs.
+func (w *WorkstationBackend) vpArgsForVM(vmxPath string) []string {
+	if !isEncryptedVM(vmxPath) {
+		return nil
+	}
+	if w.s.EncryptionPass != "" {
+		return []string{"-vp", w.s.EncryptionPass}
+	}
+	fmt.Fprintf(os.Stderr, "%s: VM is encrypted — use --vp or set VM_ENCRYPTION_PASS in .env\n", filepath.Base(filepath.Dir(vmxPath)))
+	return nil
+}
 
 func wsVmrun(vmrunPath string, args ...string) (string, error) {
 	cmd := exec.Command(vmrunPath, args...)
@@ -98,8 +135,11 @@ func wsParseInventory(inventoryPath string) ([]VM, error) {
 	return vms, nil
 }
 
-func wsListRunning(vmrunPath string) ([]string, error) {
-	output, err := wsVmrun(vmrunPath, "list")
+func wsListRunning(vmrunPath string, args ...string) ([]string, error) {
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	output, err := wsVmrun(vmrunPath, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing running VMs: %w", err)
 	}
@@ -136,7 +176,8 @@ func (w *WorkstationBackend) GetPowerState() ([]VM, error) {
 // ---------------------------------------------------------------------------
 
 func (w *WorkstationBackend) StartVM(vmxPath string) error {
-	_, err := wsStartDetached(w.s.VmrunPath, "start", vmxPath, "nogui")
+	args := append(w.vpArgsForVM(vmxPath), "start", vmxPath, "nogui")
+	_, err := wsStartDetached(w.s.VmrunPath, args...)
 	if err != nil {
 		return fmt.Errorf("starting VM %s: %w", vmxPath, err)
 	}
@@ -144,7 +185,7 @@ func (w *WorkstationBackend) StartVM(vmxPath string) error {
 }
 
 func (w *WorkstationBackend) StopVM(vmxPath string, mode ...string) error {
-	args := []string{"stop", vmxPath}
+	args := append(w.vpArgsForVM(vmxPath), "stop", vmxPath)
 	if len(mode) > 0 {
 		args = append(args, mode[0])
 	}
@@ -156,7 +197,8 @@ func (w *WorkstationBackend) StopVM(vmxPath string, mode ...string) error {
 }
 
 func (w *WorkstationBackend) SuspendVM(vmxPath string) error {
-	_, err := wsVmrun(w.s.VmrunPath, "suspend", vmxPath)
+	args := append(w.vpArgsForVM(vmxPath), "suspend", vmxPath)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
 		return fmt.Errorf("suspending VM %s: %w", vmxPath, err)
 	}
@@ -164,7 +206,8 @@ func (w *WorkstationBackend) SuspendVM(vmxPath string) error {
 }
 
 func (w *WorkstationBackend) ResetVM(vmxPath string) error {
-	_, err := wsVmrun(w.s.VmrunPath, "reset", vmxPath)
+	args := append(w.vpArgsForVM(vmxPath), "reset", vmxPath)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
 		return fmt.Errorf("resetting VM %s: %w", vmxPath, err)
 	}
@@ -175,41 +218,187 @@ func (w *WorkstationBackend) ResetVM(vmxPath string) error {
 // Guest Operations
 // ---------------------------------------------------------------------------
 
-func (w *WorkstationBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script string) (string, error) {
-	args := []string{"-T", "ws", "-gu", user, "-gp", pass, "runScriptInGuest", vmxPath, interpreter, script}
+func (w *WorkstationBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script, adminUser, adminPass string) (string, error) {
+	args := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", user, "-gp", pass, "runScriptInGuest", vmxPath, interpreter, script)
 	cmd := exec.Command(w.s.VmrunPath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if isInvalidCredentials(output) && !strings.Contains(user, `\`) {
+			if hostname, hErr := w.guestHostname(vmxPath, adminUser, adminPass); hErr == nil {
+				qUser := qualifiedUser(hostname, user)
+				retryArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", qUser, "-gp", pass, "runScriptInGuest", vmxPath, interpreter, script)
+				retryCmd := exec.Command(w.s.VmrunPath, retryArgs...)
+				retryOut, retryErr := retryCmd.CombinedOutput()
+				if retryErr == nil {
+					return string(retryOut), nil
+				}
+			}
+		}
 		return "", fmt.Errorf("vmrun runScriptInGuest failed: %w\nOutput: %s", err, output)
 	}
 	return string(output), nil
 }
 
-func (w *WorkstationBackend) RunGuestProgram(vmxPath, user, pass, program string, args ...string) (string, error) {
-	cmdArgs := []string{"-T", "ws", "-gu", user, "-gp", pass, "runProgramInGuest", vmxPath, "-activeWindow", program}
+func (w *WorkstationBackend) RunGuestProgram(vmxPath, user, pass, adminUser, adminPass, program string, args ...string) (string, error) {
+	cmdArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", user, "-gp", pass, "runProgramInGuest", vmxPath, program)
 	cmdArgs = append(cmdArgs, args...)
 	cmd := exec.Command(w.s.VmrunPath, cmdArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if isInvalidCredentials(output) && !strings.Contains(user, `\`) {
+			if hostname, hErr := w.guestHostname(vmxPath, adminUser, adminPass); hErr == nil {
+				qUser := qualifiedUser(hostname, user)
+				retryArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", qUser, "-gp", pass, "runProgramInGuest", vmxPath, program)
+				retryArgs = append(retryArgs, args...)
+				retryCmd := exec.Command(w.s.VmrunPath, retryArgs...)
+				retryOut, retryErr := retryCmd.CombinedOutput()
+				if retryErr == nil {
+					return string(retryOut), nil
+				}
+			}
+		}
 		return "", fmt.Errorf("vmrun runProgramInGuest failed: %w\nOutput: %s", err, output)
 	}
 	return string(output), nil
 }
 
-func (w *WorkstationBackend) CopyFileFromGuest(vmxPath, user, pass, guestPath, hostPath string) error {
-	_, err := wsVmrun(w.s.VmrunPath, "-T", "ws", "-gu", user, "-gp", pass, "copyFileFromGuestToHost", vmxPath, guestPath, hostPath)
+func (w *WorkstationBackend) CopyFileFromGuest(vmxPath, user, pass, adminUser, adminPass, guestPath, hostPath string) error {
+	args := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", user, "-gp", pass, "copyFileFromGuestToHost", vmxPath, guestPath, hostPath)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
+		if isInvalidCredentials([]byte(err.Error())) && !strings.Contains(user, `\`) {
+			if hostname, hErr := w.guestHostname(vmxPath, adminUser, adminPass); hErr == nil {
+				qUser := qualifiedUser(hostname, user)
+				retryArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", qUser, "-gp", pass, "copyFileFromGuestToHost", vmxPath, guestPath, hostPath)
+				if _, retryErr := wsVmrun(w.s.VmrunPath, retryArgs...); retryErr == nil {
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("copyFileFromGuestToHost failed: %w", err)
 	}
 	return nil
 }
 
-func (w *WorkstationBackend) DeleteFileInGuest(vmxPath, user, pass, guestPath string) error {
-	_, err := wsVmrun(w.s.VmrunPath, "-T", "ws", "-gu", user, "-gp", pass, "deleteFileInGuest", vmxPath, guestPath)
+func (w *WorkstationBackend) DeleteFileInGuest(vmxPath, user, pass, adminUser, adminPass, guestPath string) error {
+	args := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", user, "-gp", pass, "deleteFileInGuest", vmxPath, guestPath)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
+		if isInvalidCredentials([]byte(err.Error())) && !strings.Contains(user, `\`) {
+			if hostname, hErr := w.guestHostname(vmxPath, adminUser, adminPass); hErr == nil {
+				qUser := qualifiedUser(hostname, user)
+				retryArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", qUser, "-gp", pass, "deleteFileInGuest", vmxPath, guestPath)
+				if _, retryErr := wsVmrun(w.s.VmrunPath, retryArgs...); retryErr == nil {
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("deleteFileInGuest failed: %w", err)
 	}
 	return nil
+}
+
+func (w *WorkstationBackend) ListGuestProcesses(vmxPath, user, pass, adminUser, adminPass string) error {
+	args := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", user, "-gp", pass, "listProcessesInGuest", vmxPath)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
+	if err != nil {
+		if isInvalidCredentials([]byte(err.Error())) && !strings.Contains(user, `\`) {
+			if hostname, hErr := w.guestHostname(vmxPath, adminUser, adminPass); hErr == nil {
+				qUser := qualifiedUser(hostname, user)
+				retryArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", qUser, "-gp", pass, "listProcessesInGuest", vmxPath)
+				if _, retryErr := wsVmrun(w.s.VmrunPath, retryArgs...); retryErr == nil {
+					return nil
+				}
+			}
+		}
+	}
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// Windows hostname-prefixed auth retry
+// ---------------------------------------------------------------------------
+
+// isInvalidCredentials checks if vmrun output indicates bad credentials.
+// The error message appears in vmrun's stdout/stderr output, not in Go's
+// exec error (which is just "exit status N").
+func isInvalidCredentials(output []byte) bool {
+	return strings.Contains(string(output), "Invalid user name or password")
+}
+
+// guestHostname returns the Windows computer name for a VM, caching the result.
+// It runs "cmd /c hostname" using the supplied admin credentials.
+func (w *WorkstationBackend) guestHostname(vmxPath, adminUser, adminPass string) (string, error) {
+	w.hostnameMu.Lock()
+	if h, ok := w.hostnameCache[vmxPath]; ok {
+		w.hostnameMu.Unlock()
+		return h, nil
+	}
+	w.hostnameMu.Unlock()
+
+	if adminUser == "" || adminPass == "" {
+		return "", fmt.Errorf("no admin credentials provided for hostname lookup")
+	}
+
+	// Use runProgramInGuest with output redirected to a temp file, then copy
+	// it back. Plain "hostname" produces console output which causes vmrun to
+	// return bogus exit codes, but redirecting to a file avoids that.
+	guestTmp := `C:\Windows\Temp\rift-hostname.txt`
+	progArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", adminUser, "-gp", adminPass,
+		"runProgramInGuest", vmxPath,
+		`C:\Windows\System32\cmd.exe`, "/c hostname > "+guestTmp)
+	progCmd := exec.Command(w.s.VmrunPath, progArgs...)
+	if progOut, progErr := progCmd.CombinedOutput(); progErr != nil {
+		return "", fmt.Errorf("hostname lookup failed: %w\nOutput: %s", progErr, progOut)
+	}
+
+	// Copy the file from the guest to a local temp file.
+	hostTmp, err := os.CreateTemp("", "rift-hostname-*")
+	if err != nil {
+		return "", fmt.Errorf("creating temp file for hostname: %w", err)
+	}
+	hostTmpPath := hostTmp.Name()
+	hostTmp.Close()
+	defer os.Remove(hostTmpPath)
+
+	copyArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", adminUser, "-gp", adminPass,
+		"copyFileFromGuestToHost", vmxPath, guestTmp, hostTmpPath)
+	copyCmd := exec.Command(w.s.VmrunPath, copyArgs...)
+	if copyOut, copyErr := copyCmd.CombinedOutput(); copyErr != nil {
+		return "", fmt.Errorf("copying hostname file from guest: %w\nOutput: %s", copyErr, copyOut)
+	}
+
+	// Clean up guest temp file (best-effort).
+	delArgs := append(w.vpArgsForVM(vmxPath), "-T", "ws", "-gu", adminUser, "-gp", adminPass,
+		"deleteFileInGuest", vmxPath, guestTmp)
+	delCmd := exec.Command(w.s.VmrunPath, delArgs...)
+	_ = delCmd.Run()
+
+	data, err := os.ReadFile(hostTmpPath)
+	if err != nil {
+		return "", fmt.Errorf("reading hostname file: %w", err)
+	}
+
+	hostname := strings.TrimSpace(string(data))
+	if hostname == "" {
+		return "", fmt.Errorf("hostname lookup returned empty output")
+	}
+
+	w.hostnameMu.Lock()
+	if w.hostnameCache == nil {
+		w.hostnameCache = make(map[string]string)
+	}
+	w.hostnameCache[vmxPath] = hostname
+	w.hostnameMu.Unlock()
+	return hostname, nil
+}
+
+// qualifiedUser returns "HOSTNAME\user" if user doesn't already contain a backslash.
+func qualifiedUser(hostname, user string) string {
+	if strings.Contains(user, `\`) {
+		return user
+	}
+	return hostname + `\` + user
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +406,8 @@ func (w *WorkstationBackend) DeleteFileInGuest(vmxPath, user, pass, guestPath st
 // ---------------------------------------------------------------------------
 
 func (w *WorkstationBackend) CreateSnapshot(vmxPath, name string) error {
-	_, err := wsVmrun(w.s.VmrunPath, "snapshot", vmxPath, name)
+	args := append(w.vpArgsForVM(vmxPath), "snapshot", vmxPath, name)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
 		return fmt.Errorf("creating snapshot %q on %s: %w", name, vmxPath, err)
 	}
@@ -225,7 +415,8 @@ func (w *WorkstationBackend) CreateSnapshot(vmxPath, name string) error {
 }
 
 func (w *WorkstationBackend) RevertToSnapshot(vmxPath, name string) error {
-	_, err := wsVmrun(w.s.VmrunPath, "revertToSnapshot", vmxPath, name)
+	args := append(w.vpArgsForVM(vmxPath), "revertToSnapshot", vmxPath, name)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
 		return fmt.Errorf("reverting %s to snapshot %q: %w", vmxPath, name, err)
 	}
@@ -233,7 +424,8 @@ func (w *WorkstationBackend) RevertToSnapshot(vmxPath, name string) error {
 }
 
 func (w *WorkstationBackend) DeleteSnapshot(vmxPath, name string) error {
-	_, err := wsVmrun(w.s.VmrunPath, "deleteSnapshot", vmxPath, name)
+	args := append(w.vpArgsForVM(vmxPath), "deleteSnapshot", vmxPath, name)
+	_, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
 		return fmt.Errorf("deleting snapshot %q from %s: %w", name, vmxPath, err)
 	}
@@ -241,7 +433,8 @@ func (w *WorkstationBackend) DeleteSnapshot(vmxPath, name string) error {
 }
 
 func (w *WorkstationBackend) ListSnapshots(vmxPath string) ([]string, error) {
-	out, err := wsVmrun(w.s.VmrunPath, "listSnapshots", vmxPath)
+	args := append(w.vpArgsForVM(vmxPath), "listSnapshots", vmxPath)
+	out, err := wsVmrun(w.s.VmrunPath, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing snapshots for %s: %w", vmxPath, err)
 	}

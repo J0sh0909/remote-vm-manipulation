@@ -18,9 +18,10 @@ type VM struct {
 }
 
 type NIC struct {
-	Index string
-	Type  string
-	MAC   string
+	Index      string
+	Type       string // connection type: bridged, nat, hostonly, custom, pvn
+	VirtualDev string // virtual device: e1000, e1000e, vmxnet3
+	MAC        string
 }
 
 type VNetwork struct {
@@ -76,6 +77,7 @@ var RequiresPowerOff = map[string]bool{
 	"disk-defrag":  true,
 	"disk-compact": true,
 	"display":      true,
+	"tpm":          true,
 	"revert":       true,
 	"export":       true,
 }
@@ -660,9 +662,10 @@ func ParseVMXNetworking(vmxPath string, pvnNames map[string]string) ([]NIC, erro
 			connType = segName
 		}
 		nics = append(nics, NIC{
-			Index: num,
-			Type:  connType,
-			MAC:   mac,
+			Index:      num,
+			Type:       connType,
+			VirtualDev: data["virtualdev"],
+			MAC:        mac,
 		})
 	}
 	sort.Slice(nics, func(i, j int) bool {

@@ -65,6 +65,9 @@ var (
 	bootstrapPassFlag      string
 	bootstrapRunnerUserFlag string
 	bootstrapRunnerPassFlag string
+	vpFlag                  string
+	tpmEncryptionPassFlag   string
+	tpmEncryptAllFlag       bool
 )
 
 // ---------------------------------------------------------------------------
@@ -83,6 +86,9 @@ func requireSettings() {
 		settings, hvErr = internal.LoadSettings()
 		if hvErr != nil {
 			return
+		}
+		if vpFlag != "" {
+			settings.EncryptionPass = vpFlag
 		}
 		hv, hvErr = internal.NewHypervisor(settings)
 	})
@@ -204,6 +210,90 @@ var listCmd = &cobra.Command{
 				}
 				fmt.Printf("%s %s [%s]\n", vmPrefix, vm.Name, status)
 			}
+		}
+	},
+}
+
+// ---------------------------------------------------------------------------
+// overview
+// ---------------------------------------------------------------------------
+
+var overviewCmd = &cobra.Command{
+	Use:   "overview",
+	Short: "Show VMs across all detected hypervisors and AWS",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		total := 0
+
+		// --- VMware Workstation ---
+		if s, err := internal.LoadSettings(); err == nil {
+			if h, err := internal.NewHypervisor(s); err == nil {
+				if vms, err := h.GetPowerState(); err == nil && len(vms) > 0 {
+					fmt.Println("VMware Workstation")
+					fmt.Println(strings.Repeat("-", 40))
+					for _, vm := range vms {
+						state := "off"
+						if vm.Running {
+							state = "running"
+						}
+						fmt.Printf("  %-30s %s\n", vm.Name, state)
+					}
+					total += len(vms)
+					fmt.Println()
+				}
+			}
+		}
+
+		// --- VirtualBox ---
+		if vboxVMs, err := internal.DetectVBoxVMs(); err == nil && len(vboxVMs) > 0 {
+			fmt.Println("VirtualBox")
+			fmt.Println(strings.Repeat("-", 40))
+			for _, vm := range vboxVMs {
+				fmt.Printf("  %-30s %s\n", vm.Name, vm.State)
+			}
+			total += len(vboxVMs)
+			fmt.Println()
+		}
+
+		// --- Hyper-V ---
+		if hvVMs, err := internal.DetectHyperVVMs(); err == nil && len(hvVMs) > 0 {
+			fmt.Println("Hyper-V")
+			fmt.Println(strings.Repeat("-", 40))
+			for _, vm := range hvVMs {
+				fmt.Printf("  %-30s %s\n", vm.Name, internal.HyperVStateName(vm.State))
+			}
+			total += len(hvVMs)
+			fmt.Println()
+		}
+
+		// --- AWS EC2 ---
+		awsS, _ := internal.LoadSettings()
+		region := awsS.AWSRegion
+		if ab, err := internal.NewAWSBackend(region); err == nil {
+			if instances, err := ab.ListInstances(false); err == nil && len(instances) > 0 {
+				fmt.Println("AWS EC2")
+				fmt.Println(strings.Repeat("-", 80))
+				fmt.Printf("  %-20s %-12s %-12s %s\n", "NAME", "STATE", "TYPE", "PUBLIC IP")
+				for _, i := range instances {
+					name := i.Name
+					if name == "" {
+						name = i.ID
+					}
+					pub := i.PublicIP
+					if pub == "" {
+						pub = "-"
+					}
+					fmt.Printf("  %-20s %-12s %-12s %s\n", name, i.State, i.Type, pub)
+				}
+				total += len(instances)
+				fmt.Println()
+			}
+		}
+
+		if total == 0 {
+			fmt.Println("No VMs detected across any provider.")
+		} else {
+			fmt.Printf("Total: %d VM(s)\n", total)
 		}
 	},
 }
@@ -491,6 +581,92 @@ var resetCmd = &cobra.Command{
 	},
 }
 
+var restartCmd = &cobra.Command{
+	Use:   "restart [vm-names...]",
+	Short: "Restart one or more VMs (hard stop then start)",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+		exitOnErr(hv.EnsureVMwareRunning())
+
+		if folderFlag == "" {
+			for _, vm := range targets {
+				if !vm.Running {
+					internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+					continue
+				}
+				internal.LogInfo(vm.Name, "restarting...")
+				if err := hv.StopVM(vm.Path, "hard"); err != nil {
+					internal.LogError(internal.ErrStopFailed, vm.Name, "%s", err)
+					continue
+				}
+				if err := hv.StartVM(vm.Path); err != nil {
+					internal.LogError(internal.ErrStartFailed, vm.Name, "%s", err)
+					continue
+				}
+				internal.LogInfo(vm.Name, "restarted")
+			}
+			return
+		}
+
+		// Folder mode: stop all in parallel, then start all in parallel.
+		var (
+			mu      sync.Mutex
+			stopped []internal.VM
+			wg      sync.WaitGroup
+		)
+		// Phase 1: stop all
+		for _, vm := range targets {
+			if !vm.Running {
+				internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+				continue
+			}
+			internal.LogInfo(vm.Name, "restarting...")
+			wg.Add(1)
+			go func(vm internal.VM) {
+				defer wg.Done()
+				if err := hv.StopVM(vm.Path, "hard"); err != nil {
+					internal.LogError(internal.ErrStopFailed, vm.Name, "%s", err)
+					return
+				}
+				mu.Lock()
+				stopped = append(stopped, vm)
+				mu.Unlock()
+			}(vm)
+		}
+		wg.Wait()
+
+		// Phase 2: start all that stopped successfully
+		var results []powerResult
+		for _, vm := range stopped {
+			wg.Add(1)
+			go func(vm internal.VM) {
+				defer wg.Done()
+				var r powerResult
+				if err := hv.StartVM(vm.Path); err != nil {
+					r = powerResult{vm.Name, internal.ErrStartFailed, err.Error()}
+				} else {
+					r = powerResult{vm.Name, "", "restarted"}
+				}
+				mu.Lock()
+				results = append(results, r)
+				mu.Unlock()
+			}(vm)
+		}
+		wg.Wait()
+
+		sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+		for _, r := range results {
+			if r.code != "" {
+				internal.LogError(r.code, r.name, "%s", r.msg)
+			} else {
+				internal.LogInfo(r.name, r.msg)
+			}
+		}
+	},
+}
+
 // ---------------------------------------------------------------------------
 // exec
 // ---------------------------------------------------------------------------
@@ -567,30 +743,30 @@ var execCmd = &cobra.Command{
 
 			if isWindows {
 				guestOutputPath := `C:\Windows\Temp\rift-exec-output.txt`
-				if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\rift-exec-output.txt`); err != nil {
+				if _, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\rift-exec-output.txt`); err != nil {
 					internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
 					return result{vm.Name, ""}
 				}
 
 				tmpFile, err := os.CreateTemp("", "rift-exec-*")
 				if err != nil {
-					_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+					_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 					internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
 					return result{vm.Name, ""}
 				}
 				hostPath := tmpFile.Name()
 				tmpFile.Close()
 
-				if err := hv.CopyFileFromGuest(vm.Path, user, pass, guestOutputPath, hostPath); err != nil {
+				if err := hv.CopyFileFromGuest(vm.Path, user, pass, "", "", guestOutputPath, hostPath); err != nil {
 					os.Remove(hostPath)
-					_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+					_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 					internal.LogError(internal.ErrOutputCapture, vm.Name, "%s", err)
 					return result{vm.Name, ""}
 				}
 
 				data, readErr := os.ReadFile(hostPath)
 				os.Remove(hostPath)
-				_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 				if readErr != nil {
 					internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
 					return result{vm.Name, ""}
@@ -600,30 +776,30 @@ var execCmd = &cobra.Command{
 			// Linux/non-Windows: temp file redirect
 			guestOutputPath := "/tmp/rift-exec-output.txt"
 			wrappedScript := script + " > /tmp/rift-exec-output.txt 2>&1"
-			if _, err := hv.RunGuestCommand(vm.Path, user, pass, interpreter, wrappedScript); err != nil {
+			if _, err := hv.RunGuestCommand(vm.Path, user, pass, interpreter, wrappedScript, "", ""); err != nil {
 				internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
 				return result{vm.Name, ""}
 			}
 
 			tmpFile, err := os.CreateTemp("", "rift-exec-*")
 			if err != nil {
-				_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 				internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
 				return result{vm.Name, ""}
 			}
 			hostPath := tmpFile.Name()
 			tmpFile.Close()
 
-			if err := hv.CopyFileFromGuest(vm.Path, user, pass, guestOutputPath, hostPath); err != nil {
+			if err := hv.CopyFileFromGuest(vm.Path, user, pass, "", "", guestOutputPath, hostPath); err != nil {
 				os.Remove(hostPath)
-				_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 				internal.LogError(internal.ErrOutputCapture, vm.Name, "%s", err)
 				return result{vm.Name, ""}
 			}
 
 			data, readErr := os.ReadFile(hostPath)
 			os.Remove(hostPath)
-			_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+			_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 			if readErr != nil {
 				internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
 				return result{vm.Name, ""}
@@ -673,8 +849,9 @@ var execCmd = &cobra.Command{
 // ---------------------------------------------------------------------------
 
 // winCmd runs a single cmd.exe /c command in a Windows guest and returns any error.
+// The caller's user/pass are assumed to be admin-level; no hostname retry fallback.
 func winCmd(vm internal.VM, user, pass, arg string) error {
-	_, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`, "/c "+arg)
+	_, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+arg)
 	return err
 }
 
@@ -683,7 +860,7 @@ func winCmd(vm internal.VM, user, pass, arg string) error {
 // linuxInner is the command string run inside sudo -S bash -c '...'.
 func bootstrapRunLinux(vm internal.VM, user, pass, linuxInner, successMsg string) powerResult {
 	if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash",
-		`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`); err != nil {
+		`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`, "", ""); err != nil {
 		return powerResult{vm.Name, internal.ErrBootstrapLinux, "failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", successMsg}
@@ -692,7 +869,7 @@ func bootstrapRunLinux(vm internal.VM, user, pass, linuxInner, successMsg string
 // bootstrapWindowsCreate provisions the runner user on a Windows guest using
 // pure cmd.exe commands — no PowerShell or script download required.
 func bootstrapWindowsCreate(vm internal.VM, user, pass, ru, rp string) powerResult {
-	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add /fullname:"Automation Runner" /comment:"VM automation user"`); err != nil {
+	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add`); err != nil {
 		return powerResult{vm.Name, internal.ErrBootstrapWindows, "create user failed: " + err.Error()}
 	}
 	// Add to local Administrators group; fall back to French locale name if needed.
@@ -716,8 +893,10 @@ func bootstrapWindowsCreate(vm internal.VM, user, pass, ru, rp string) powerResu
 func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
 	allOK := true
 
-	// Check 1: user exists
-	if winCmd(vm, user, pass, `net user `+ru) == nil {
+	// Check 1: user exists.
+	// >nul 2>&1 is required — runProgramInGuest returns bogus exit codes
+	// when commands produce console output.
+	if winCmd(vm, user, pass, `net user `+ru+` >nul 2>&1`) == nil {
 		fmt.Printf("[%s]   [OK]   user '%s' exists\n", vm.Name, ru)
 	} else {
 		fmt.Printf("[%s]   [FAIL] user '%s' does not exist\n", vm.Name, ru)
@@ -725,8 +904,7 @@ func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
 	}
 
 	// Check 2: user is in the local Administrators group.
-	// "net user <name>" lists group memberships; pipe through findstr to check.
-	// Search for "Administ" — common prefix across Administrators/Administrateurs/Administratoren/Administradores.
+	// Search for "Administ" — common prefix across locales (EN/FR/DE/ES).
 	// Fallback: list the group directly by English or French name.
 	inAdmin := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Administ`) == nil
 	if !inAdmin {
@@ -751,7 +929,12 @@ func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
 	}
 
 	// Check 4: password expiry disabled.
-	if winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' get PasswordExpires | findstr /I FALSE`) == nil {
+	// "net user <name>" shows "Jamais" (FR) or "Never" (EN) when expiry is off.
+	noExpiry := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Jamais`) == nil
+	if !noExpiry {
+		noExpiry = winCmd(vm, user, pass, `net user `+ru+` | findstr /I Never`) == nil
+	}
+	if noExpiry {
 		fmt.Printf("[%s]   [OK]   password expiry disabled\n", vm.Name)
 	} else {
 		fmt.Printf("[%s]   [FAIL] password expiry is not disabled\n", vm.Name)
@@ -781,7 +964,7 @@ func bootstrapWindowsRevoke(vm internal.VM, user, pass, ru string) powerResult {
 }
 
 // bootstrapAdminAuth resolves guest credentials from flags only — no .env fallback.
-// Use this for operations that must run as an admin (verify, revoke).
+// Use this for operations that must run as an admin (create, revoke).
 func bootstrapAdminAuth(userFlag, passFlag string) (user, pass string, ok bool) {
 	if userFlag == "" || passFlag == "" {
 		fmt.Fprintln(os.Stderr, "error: --user and --pass are required (admin credentials needed)")
@@ -886,10 +1069,14 @@ var bootstrapVerifyCmd = &cobra.Command{
 		requireSettings()
 		targets, err := internal.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
-		user, pass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
+		// Admin creds for system checks: --user/--pass → .env fallback.
+		adminUser, adminPass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
+		// Runner creds for the final auth test: always from .env.
+		runnerUser := settings.DefaultUser
+		runnerPass := settings.DefaultPass
 		ru := bootstrapEffectiveRunnerUser()
 		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
 			if !vm.Running {
@@ -902,9 +1089,9 @@ var bootstrapVerifyCmd = &cobra.Command{
 			isWin := strings.HasPrefix(strings.ToLower(guestOS), "windows")
 			var r powerResult
 			if isWin {
-				r = bootstrapWindowsVerify(vm, user, pass, ru)
+				r = bootstrapWindowsVerify(vm, adminUser, adminPass, ru)
 			} else {
-				r = bootstrapRunLinux(vm, user, pass,
+				r = bootstrapRunLinux(vm, adminUser, adminPass,
 					`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-linux.sh -o /tmp/verify.sh && chmod +x /tmp/verify.sh && /tmp/verify.sh `+ru,
 					"verify passed",
 				)
@@ -912,13 +1099,16 @@ var bootstrapVerifyCmd = &cobra.Command{
 			if r.code != "" {
 				return r
 			}
-			runnerUser := settings.DefaultUser
-			runnerPass := settings.DefaultPass
+			if runnerUser == "" || runnerPass == "" {
+				return powerResult{vm.Name, "", "verify passed (runner auth skipped — VM_DEFAULT_USER/VM_DEFAULT_PASS not set)"}
+			}
 			var authErr error
 			if isWin {
-				_, authErr = hv.RunGuestProgram(vm.Path, runnerUser, runnerPass, `C:\Windows\System32\cmd.exe`, `/c whoami`)
+				// runProgramInGuest rejects valid credentials for non-original
+				// users on Windows 10. listProcessesInGuest works reliably.
+				authErr = hv.ListGuestProcesses(vm.Path, runnerUser, runnerPass, adminUser, adminPass)
 			} else {
-				_, authErr = hv.RunGuestCommand(vm.Path, runnerUser, runnerPass, "/bin/bash", "whoami")
+				_, authErr = hv.RunGuestCommand(vm.Path, runnerUser, runnerPass, "/bin/bash", "whoami", adminUser, adminPass)
 			}
 			if authErr == nil {
 				return powerResult{vm.Name, "", "verify passed (runner auth OK)"}
@@ -1310,10 +1500,16 @@ var archiveExportCmd = &cobra.Command{
 			if folderPart == "." {
 				folderPart = ""
 			}
+			// Determine hypervisor identifier for archive naming.
+			hvID := "vmw" // default — VMware Workstation
+			if settings.Hypervisor == "proxmox" {
+				hvID = "pve"
+			}
+
 			var destPath, dir string
 			switch format {
 			case "ovf":
-				versionDir := label + "-" + ts
+				versionDir := label + "-" + hvID + "-" + ts
 				if folderPart != "" {
 					dir = filepath.Join(settings.ArchivePath, "OVF", folderPart, label, versionDir)
 				} else {
@@ -1334,7 +1530,7 @@ var archiveExportCmd = &cobra.Command{
 					internal.LogError(internal.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
 					return "", false
 				}
-				destPath = filepath.Join(dir, label+"-"+ts+".ova")
+				destPath = filepath.Join(dir, label+"-"+hvID+"-"+ts+".ova")
 			}
 			return destPath, true
 		}
@@ -1936,6 +2132,97 @@ var configOsCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
+// config tpm
+// ---------------------------------------------------------------------------
+
+var configTpmCmd = &cobra.Command{
+	Use:   "tpm [vm-names...]",
+	Short: "Show TPM status for a VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+
+		for _, vm := range targets {
+			data, err := internal.ParseVMXKeys(vm.Path)
+			if err != nil {
+				internal.LogError(internal.ErrTPMConfig, vm.Name, "%s", err)
+				continue
+			}
+			vtpmPresent := strings.EqualFold(data["vtpm.present"], "TRUE")
+			if !vtpmPresent {
+				fmt.Printf("%s → TPM: not present\n", vm.Name)
+				continue
+			}
+			encType := "select files"
+			if strings.EqualFold(data["encryption.encryptedvmx"], "TRUE") {
+				encType = "full VM"
+			}
+			fmt.Printf("%s → TPM: present (encryption: %s)\n", vm.Name, encType)
+		}
+	},
+}
+
+var configTpmAddCmd = &cobra.Command{
+	Use:   "add [vm-names...]",
+	Short: "Add a virtual TPM to a VM (requires encryption)",
+	Run: func(cmd *cobra.Command, args []string) {
+		if tpmEncryptionPassFlag == "" {
+			fmt.Println("--encryption-pass is required (VMware requires encryption for TPM)")
+			return
+		}
+
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+
+		for _, vm := range targets {
+			if !requireOff(vm, "tpm") {
+				continue
+			}
+			keys := map[string]string{
+				"managedvm.autoAddVTPM": "software",
+				"vtpm.present":         "TRUE",
+			}
+			if tpmEncryptAllFlag {
+				keys["encryption.encryptedvmx"] = "TRUE"
+			}
+			for k, v := range keys {
+				if err := internal.SetVMXKey(vm.Path, k, v); err != nil {
+					internal.LogError(internal.ErrTPMConfig, vm.Name, "%s", err)
+					continue
+				}
+			}
+			encDesc := "select files"
+			if tpmEncryptAllFlag {
+				encDesc = "full VM"
+			}
+			internal.LogInfo(vm.Name, "TPM added (encryption: %s, password set via --encryption-pass)", encDesc)
+		}
+	},
+}
+
+var configTpmRemoveCmd = &cobra.Command{
+	Use:   "remove [vm-names...]",
+	Short: "Remove the virtual TPM from a VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+
+		for _, vm := range targets {
+			if !requireOff(vm, "tpm") {
+				continue
+			}
+			for _, key := range []string{"managedvm.autoAddVTPM", "vtpm.present", "encryption.encryptedvmx"} {
+				_ = internal.RemoveVMXKey(vm.Path, key)
+			}
+			internal.LogInfo(vm.Name, "TPM removed")
+		}
+	},
+}
+
+// ---------------------------------------------------------------------------
 // networks
 // ---------------------------------------------------------------------------
 
@@ -2372,11 +2659,13 @@ func Execute() {
 func init() {
 	// Top-level commands
 	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(overviewCmd)
 	rootCmd.AddCommand(infoCmd)
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(suspendCmd)
 	rootCmd.AddCommand(resetCmd)
+	rootCmd.AddCommand(restartCmd)
 	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(bootstrapCmd)
 	bootstrapCmd.AddCommand(bootstrapCreateCmd)
@@ -2411,6 +2700,9 @@ func init() {
 	configCmd.AddCommand(configCdromCmd)
 	configCmd.AddCommand(configDisplayCmd)
 	configCmd.AddCommand(configOsCmd)
+	configCmd.AddCommand(configTpmCmd)
+	configTpmCmd.AddCommand(configTpmAddCmd)
+	configTpmCmd.AddCommand(configTpmRemoveCmd)
 
 	// Disk subcommands
 	configDiskCmd.AddCommand(configDiskAddCmd)
@@ -2428,9 +2720,10 @@ func init() {
 
 	// Folder flag on all commands that support it
 	for _, cmd := range []*cobra.Command{
-		startCmd, stopCmd, suspendCmd, resetCmd, execCmd, infoCmd,
+		startCmd, stopCmd, suspendCmd, resetCmd, restartCmd, execCmd, infoCmd,
 		bootstrapCmd, bootstrapCreateCmd, bootstrapVerifyCmd, bootstrapResetCmd, bootstrapRevokeCmd,
 		configCpuCmd, configRamCmd, configNicCmd, configDisplayCmd, configOsCmd,
+		configTpmCmd, configTpmAddCmd, configTpmRemoveCmd,
 		configDiskAddCmd, configDiskRemoveCmd, configDiskExpandCmd,
 		configDiskDefragCmd, configDiskCompactCmd,
 		configCdromMountCmd, configCdromUnmountCmd, configCdromBootCmd,
@@ -2529,10 +2822,17 @@ func init() {
 	// OS
 	configOsCmd.Flags().StringVarP(&osSetFlag, "set", "s", "", "guestOS value to write into the VMX")
 
+	// TPM
+	configTpmAddCmd.Flags().StringVar(&tpmEncryptionPassFlag, "encryption-pass", "", "VM encryption password (required)")
+	configTpmAddCmd.Flags().BoolVar(&tpmEncryptAllFlag, "encrypt-all", false, "Encrypt all VM files (default: select files only)")
+
 	// Exec
 	execCmd.Flags().StringVarP(&execUserFlag, "user", "u", "", "Guest OS username (required)")
 	execCmd.Flags().StringVarP(&execPassFlag, "pass", "p", "", "Guest OS password (required)")
 	execCmd.Flags().StringVarP(&execInterpreterFlag, "interpreter", "i", "", "Script interpreter (e.g. /bin/bash, C:\\Windows\\System32\\cmd.exe; default: auto-detect)")
+
+	// VM encryption password (global)
+	rootCmd.PersistentFlags().StringVar(&vpFlag, "vp", "", "VM encryption password (overrides VM_ENCRYPTION_PASS from .env)")
 
 	// Bootstrap — persistent flags shared by all subcommands
 	bootstrapCmd.PersistentFlags().StringVarP(&bootstrapUserFlag, "user", "u", "", "Guest OS username with admin/root privileges")
