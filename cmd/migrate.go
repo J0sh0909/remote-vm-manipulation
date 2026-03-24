@@ -9,9 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/J0sh0909/rift/internal"
 	"github.com/spf13/cobra"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,13 +45,54 @@ func findQemuImg() (string, error) {
 	return p, nil
 }
 
-// convertDisk runs qemu-img convert with a progress bar based on output file size growth.
-func convertDisk(qemuImg, srcPath, srcFmt, dstPath, dstFmt string) error {
-	args := []string{"convert", "-f", srcFmt, "-O", dstFmt, "-p", srcPath, dstPath}
+// convertDiskWithBar runs qemu-img convert, updating an mpb bar by monitoring
+// output file size growth relative to the source disk size.
+func convertDiskWithBar(qemuImg, srcPath, srcFmt, dstPath, dstFmt string, bar *mpb.Bar) error {
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("stat source disk: %s", err)
+	}
+	srcSize := srcInfo.Size()
+	if srcSize == 0 {
+		srcSize = 1
+	}
+
+	args := []string{"convert", "-f", srcFmt, "-O", dstFmt, srcPath, dstPath}
 	cmd := exec.Command(qemuImg, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if fi, err := os.Stat(dstPath); err == nil {
+					pct := int64(fi.Size() * 100 / srcSize)
+					if pct > 99 {
+						pct = 99
+					}
+					bar.SetCurrent(pct)
+				}
+			}
+		}
+	}()
+
+	err = cmd.Wait()
+	close(done)
+	if err != nil {
+		bar.Abort(false)
+		return err
+	}
+	bar.SetCurrent(100)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -256,26 +300,43 @@ func migrateFolderVMwareToVBox() {
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
 
-	var (
-		mu      sync.Mutex
-		results []migrateResult
-		wg      sync.WaitGroup
-	)
+	maxName := 0
 	for _, vm := range targets {
+		if len(vm.Name) > maxName {
+			maxName = len(vm.Name)
+		}
+	}
+	nameFmt := fmt.Sprintf("%%-%ds", maxName)
+
+	results := make([]migrateResult, len(targets))
+	p := mpb.New()
+	var wg sync.WaitGroup
+	for i, vm := range targets {
+		i, vm := i, vm
+		bar := p.New(100,
+			mpb.BarStyle().Lbound("[").Filler("=").Tip("").Padding(" ").Rbound("]"),
+			mpb.BarWidth(40),
+			mpb.PrependDecorators(
+				decor.Name(fmt.Sprintf(nameFmt, vm.Name)),
+			),
+			mpb.AppendDecorators(
+				decor.Percentage(decor.WCSyncSpaceR),
+			),
+		)
 		wg.Add(1)
-		go func(vm internal.VM) {
+		go func() {
 			defer wg.Done()
-			err := migrateOneVMwareToVBox(vm)
-			mu.Lock()
-			results = append(results, migrateResult{name: vm.Name, err: err})
-			mu.Unlock()
-		}(vm)
+			err := migrateOneVMwareToVBox(vm, bar)
+			results[i] = migrateResult{name: vm.Name, err: err}
+		}()
 	}
 	wg.Wait()
-	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	p.Wait()
 	for _, r := range results {
 		if r.err != nil {
 			internal.LogError(internal.ErrMigration, r.name, "%s", r.err)
+		} else {
+			fmt.Printf("%s → migrated to VirtualBox\n", r.name)
 		}
 	}
 }
@@ -298,37 +359,53 @@ func migrateFolderVBoxToVMware() {
 	}
 	sort.Slice(vbVMs, func(i, j int) bool { return vbVMs[i].Name < vbVMs[j].Name })
 
-	var (
-		mu      sync.Mutex
-		results []migrateResult
-		wg      sync.WaitGroup
-	)
+	maxName := 0
 	for _, vm := range vbVMs {
+		if len(vm.Name) > maxName {
+			maxName = len(vm.Name)
+		}
+	}
+	nameFmt := fmt.Sprintf("%%-%ds", maxName)
+
+	results := make([]migrateResult, len(vbVMs))
+	p := mpb.New()
+	var wg sync.WaitGroup
+	for i, vm := range vbVMs {
+		i, vm := i, vm
+		bar := p.New(100,
+			mpb.BarStyle().Lbound("[").Filler("=").Tip("").Padding(" ").Rbound("]"),
+			mpb.BarWidth(40),
+			mpb.PrependDecorators(
+				decor.Name(fmt.Sprintf(nameFmt, vm.Name)),
+			),
+			mpb.AppendDecorators(
+				decor.Percentage(decor.WCSyncSpaceR),
+			),
+		)
 		wg.Add(1)
-		go func(vm internal.VBoxVM) {
+		go func() {
 			defer wg.Done()
-			err := migrateOneVBoxToVMware(vm.Name)
-			mu.Lock()
-			results = append(results, migrateResult{name: vm.Name, err: err})
-			mu.Unlock()
-		}(vm)
+			err := migrateOneVBoxToVMware(vm.Name, bar)
+			results[i] = migrateResult{name: vm.Name, err: err}
+		}()
 	}
 	wg.Wait()
-	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	p.Wait()
 	for _, r := range results {
 		if r.err != nil {
 			internal.LogError(internal.ErrMigration, r.name, "%s", r.err)
+		} else {
+			fmt.Printf("%s → migrated to VMware Workstation\n", r.name)
 		}
 	}
 }
 
 // migrateOneVMwareToVBox migrates a single VMware VM to VBox. Returns nil on success.
-func migrateOneVMwareToVBox(sourceVM internal.VM) error {
+// The provided mpb bar is updated with disk conversion progress.
+func migrateOneVMwareToVBox(sourceVM internal.VM, bar *mpb.Bar) error {
 	if sourceVM.Running {
 		return fmt.Errorf("VM must be powered off before migration")
 	}
-
-	fmt.Printf("%s → converting disk...\n", sourceVM.Name)
 
 	specs, err := internal.ParseVMXSpecs(sourceVM.Path)
 	if err != nil {
@@ -363,11 +440,10 @@ func migrateOneVMwareToVBox(sourceVM internal.VM) error {
 	}
 
 	vdiPath := filepath.Join(filepath.Dir(vmdkPath), sourceVM.Name+".vdi")
-	if err := convertDisk(qemuImg, vmdkPath, "vmdk", vdiPath, "vdi"); err != nil {
+	if err := convertDiskWithBar(qemuImg, vmdkPath, "vmdk", vdiPath, "vdi", bar); err != nil {
 		return fmt.Errorf("disk conversion: %s", err)
 	}
 
-	fmt.Printf("%s → creating VM...\n", sourceVM.Name)
 	vbox, err := internal.NewVBoxBackend()
 	if err != nil {
 		return fmt.Errorf("VBoxManage: %s", err)
@@ -397,12 +473,12 @@ func migrateOneVMwareToVBox(sourceVM internal.VM) error {
 			"--nictype"+idx, vboxDev).Run()
 	}
 
-	fmt.Printf("%s → migrated to VirtualBox\n", sourceVM.Name)
 	return nil
 }
 
 // migrateOneVBoxToVMware migrates a single VBox VM to VMware. Returns nil on success.
-func migrateOneVBoxToVMware(vmName string) error {
+// The provided mpb bar is updated with disk conversion progress.
+func migrateOneVBoxToVMware(vmName string, bar *mpb.Bar) error {
 	vbox, err := internal.NewVBoxBackend()
 	if err != nil {
 		return fmt.Errorf("%s", err)
@@ -414,8 +490,6 @@ func migrateOneVBoxToVMware(vmName string) error {
 	if info.State == "running" {
 		return fmt.Errorf("VM must be powered off before migration")
 	}
-
-	fmt.Printf("%s → converting disk...\n", vmName)
 
 	if len(info.Disks) == 0 {
 		return fmt.Errorf("no disks found")
@@ -439,11 +513,10 @@ func migrateOneVBoxToVMware(vmName string) error {
 		srcFmt = "vpc"
 	}
 	vmdkPath := filepath.Join(destDir, vmName+".vmdk")
-	if err := convertDisk(qemuImg, srcDisk, srcFmt, vmdkPath, "vmdk"); err != nil {
+	if err := convertDiskWithBar(qemuImg, srcDisk, srcFmt, vmdkPath, "vmdk", bar); err != nil {
 		return fmt.Errorf("disk conversion: %s", err)
 	}
 
-	fmt.Printf("%s → creating VM...\n", vmName)
 	vmxPath := filepath.Join(destDir, vmName+".vmx")
 	guestOS := vboxToVMwareOS(info.OSType)
 	cpus := info.CPUs
@@ -460,7 +533,6 @@ func migrateOneVBoxToVMware(vmName string) error {
 		return fmt.Errorf("writing VMX: %s", err)
 	}
 
-	fmt.Printf("%s → migrated to VMware Workstation\n", vmName)
 	return nil
 }
 
@@ -495,93 +567,25 @@ func migrateVMwareToVBox(vmName string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("%s → reading VMware config...\n", vmName)
+	p := mpb.New()
+	bar := p.New(100,
+		mpb.BarStyle().Lbound("[").Filler("=").Tip("").Padding(" ").Rbound("]"),
+		mpb.BarWidth(40),
+		mpb.PrependDecorators(
+			decor.Name(vmName),
+		),
+		mpb.AppendDecorators(
+			decor.Percentage(decor.WCSyncSpaceR),
+		),
+	)
 
-	// 2. Read VM specs.
-	specs, err := internal.ParseVMXSpecs(sourceVM.Path)
-	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "reading specs: %s", err)
+	if err := migrateOneVMwareToVBox(sourceVM, bar); err != nil {
+		p.Wait()
+		internal.LogError(internal.ErrMigration, vmName, "%s", err)
 		os.Exit(1)
 	}
-	vmxData, err := internal.ParseVMXKeys(sourceVM.Path)
-	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "reading VMX: %s", err)
-		os.Exit(1)
-	}
-	guestOS := vmxData["guestos"]
-	cpus, _ := strconv.Atoi(specs.CPUCount)
-	if cpus < 1 {
-		cpus = 1
-	}
-	ramMB, _ := strconv.Atoi(specs.MemoryMB)
-	if ramMB < 512 {
-		ramMB = 512
-	}
-
-	// 3. Find disk.
-	disks, err := internal.ParseVMXDisks(sourceVM.Path)
-	if err != nil || len(disks) == 0 {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "no disks found")
-		os.Exit(1)
-	}
-	vmdkPath := disks[0].FileName
-	if !filepath.IsAbs(vmdkPath) {
-		vmdkPath = filepath.Join(filepath.Dir(sourceVM.Path), vmdkPath)
-	}
-
-	// 4. Find qemu-img.
-	qemuImg, err := findQemuImg()
-	if err != nil {
-		internal.LogError(internal.ErrQemuImgNotFound, vmName, "%s", err)
-		os.Exit(1)
-	}
-
-	// 5. Convert disk.
-	vdiPath := filepath.Join(filepath.Dir(vmdkPath), vmName+".vdi")
-	fmt.Printf("%s → converting disk (vmdk → vdi)...\n", vmName)
-	if err := convertDisk(qemuImg, vmdkPath, "vmdk", vdiPath, "vdi"); err != nil {
-		internal.LogError(internal.ErrDiskConvertMig, vmName, "%s", err)
-		os.Exit(1)
-	}
-
-	// 6. Create VBox VM.
-	fmt.Printf("%s → creating VirtualBox VM...\n", vmName)
-	vbox, err := internal.NewVBoxBackend()
-	if err != nil {
-		internal.LogError(internal.ErrTargetHypervisor, vmName, "%s", err)
-		os.Exit(1)
-	}
-	vboxOS := vmwareToVBoxOS(guestOS)
-	if err := vbox.CreateVM(vmName, vboxOS, cpus, ramMB); err != nil {
-		internal.LogError(internal.ErrTargetHypervisor, vmName, "creating VM: %s", err)
-		os.Exit(1)
-	}
-
-	// 7. Add SATA controller and attach disk.
-	if err := vbox.AddSATAController(vmName, "SATA"); err != nil {
-		internal.LogError(internal.ErrTargetHypervisor, vmName, "adding SATA controller: %s", err)
-		os.Exit(1)
-	}
-	if err := vbox.AttachDisk(vmName, vdiPath, "SATA"); err != nil {
-		internal.LogError(internal.ErrTargetHypervisor, vmName, "attaching disk: %s", err)
-		os.Exit(1)
-	}
-
-	// 8. Configure NICs (connection type + virtual device).
-	nics, _ := internal.ParseVMXNetworking(sourceVM.Path, nil)
-	for _, nic := range nics {
-		vboxConn := nicConnVMwareToVBox(nic.Type)
-		vboxDev := nicDevVMwareToVBox(nic.VirtualDev)
-		idx := "1"
-		if nic.Index != "" {
-			n, _ := strconv.Atoi(nic.Index)
-			idx = strconv.Itoa(n + 1)
-		}
-		exec.Command(vbox.VBoxManagePath(), "modifyvm", vmName,
-			"--nic"+idx, vboxConn,
-			"--nictype"+idx, vboxDev).Run()
-	}
-
+	p.Wait()
+	fmt.Printf("%s → creating VM...\n", vmName)
 	fmt.Printf("%s → migrated to VirtualBox\n", vmName)
 }
 
@@ -608,63 +612,26 @@ func migrateVBoxToVMware(vmName string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("%s → reading VirtualBox config...\n", vmName)
+	p := mpb.New()
+	bar := p.New(100,
+		mpb.BarStyle().Lbound("[").Filler("=").Tip("").Padding(" ").Rbound("]"),
+		mpb.BarWidth(40),
+		mpb.PrependDecorators(
+			decor.Name(vmName),
+		),
+		mpb.AppendDecorators(
+			decor.Percentage(decor.WCSyncSpaceR),
+		),
+	)
 
-	if len(info.Disks) == 0 {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "no disks found")
+	if err := migrateOneVBoxToVMware(vmName, bar); err != nil {
+		p.Wait()
+		internal.LogError(internal.ErrMigration, vmName, "%s", err)
 		os.Exit(1)
 	}
-
-	// 2. Find qemu-img.
-	qemuImg, err := findQemuImg()
-	if err != nil {
-		internal.LogError(internal.ErrQemuImgNotFound, vmName, "%s", err)
-		os.Exit(1)
-	}
-
-	// 3. Create destination directory under VM_DIRECTORY.
-	destDir := filepath.Join(settings.VmDirectory, vmName)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		internal.LogError(internal.ErrTargetHypervisor, vmName, "creating directory: %s", err)
-		os.Exit(1)
-	}
-
-	// 4. Convert disk.
-	srcDisk := info.Disks[0]
-	srcFmt := "vdi"
-	if strings.HasSuffix(srcDisk, ".vmdk") {
-		srcFmt = "vmdk"
-	} else if strings.HasSuffix(srcDisk, ".vhd") {
-		srcFmt = "vpc"
-	}
-	vmdkPath := filepath.Join(destDir, vmName+".vmdk")
-	fmt.Printf("%s → converting disk (%s → vmdk)...\n", vmName, srcFmt)
-	if err := convertDisk(qemuImg, srcDisk, srcFmt, vmdkPath, "vmdk"); err != nil {
-		internal.LogError(internal.ErrDiskConvertMig, vmName, "%s", err)
-		os.Exit(1)
-	}
-
-	// 5. Generate VMX file.
-	vmxPath := filepath.Join(destDir, vmName+".vmx")
-	guestOS := vboxToVMwareOS(info.OSType)
-	cpus := info.CPUs
-	if cpus < 1 {
-		cpus = 1
-	}
-	ramMB := info.MemoryMB
-	if ramMB < 512 {
-		ramMB = 512
-	}
-
-	fmt.Printf("%s → generating VMX file...\n", vmName)
-	vmxContent := generateVMX(vmName, guestOS, cpus, ramMB, vmName+".vmdk", info.NICs)
-	if err := os.WriteFile(vmxPath, []byte(vmxContent), 0644); err != nil {
-		internal.LogError(internal.ErrTargetHypervisor, vmName, "writing VMX: %s", err)
-		os.Exit(1)
-	}
-
+	p.Wait()
+	fmt.Printf("%s → creating VM...\n", vmName)
 	fmt.Printf("%s → migrated to VMware Workstation\n", vmName)
-	fmt.Printf("VMX file: %s\n", vmxPath)
 }
 
 // generateVMX creates a minimal VMX file for a migrated VM.
