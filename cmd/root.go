@@ -227,41 +227,109 @@ var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all VMs",
 	Run: func(cmd *cobra.Command, args []string) {
-		requireSettings()
-		vms, err := hv.GetPowerState()
+		s, err := core.LoadSettings()
 		exitOnErr(err)
-
-		folders := make(map[string][]core.VM)
-		for _, vm := range vms {
-			folders[vm.Folder] = append(folders[vm.Folder], vm)
+		if vpFlag != "" {
+			s.EncryptionPass = vpFlag
 		}
 
-		folderNames := make([]string, 0, len(folders))
-		for name := range folders {
-			folderNames = append(folderNames, name)
+		backendNames := map[string]string{
+			"workstation": "VMware Workstation",
+			"vbox":        "VirtualBox",
+			"hyperv":      "Hyper-V",
+			"proxmox":     "Proxmox",
 		}
-		sort.Strings(folderNames)
 
-		for i, folder := range folderNames {
-			folderPrefix := "├──"
-			childPrefix := "│   "
-			if i == len(folderNames)-1 {
-				folderPrefix = "└──"
-				childPrefix = "    "
-			}
-			fmt.Printf("%s %s\n", folderPrefix, folder)
+		// If --hv flag or HYPERVISOR is set, list only that backend.
+		// Otherwise, iterate all detected backends.
+		var backends []string
+		if hvFlag != "" {
+			backends = []string{hvFlag}
+		} else if s.Hypervisor != "" {
+			backends = []string{s.Hypervisor}
+		} else {
+			backends = core.DetectHypervisors(s)
+		}
 
-			for j, vm := range folders[folder] {
-				status := "OFF"
-				if vm.Running {
-					status = "ON"
-				}
-				vmPrefix := childPrefix + "├──"
-				if j == len(folders[folder])-1 {
-					vmPrefix = childPrefix + "└──"
-				}
-				fmt.Printf("%s %s [%s]\n", vmPrefix, vm.Name, status)
+		if len(backends) == 0 {
+			fmt.Println("No hypervisors detected - check .env")
+			return
+		}
+
+		multiBackend := len(backends) > 1
+		total := 0
+
+		for _, name := range backends {
+			backend, err := core.CreateBackend(name, s)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "skipping %s: %s\n", name, err)
+				continue
 			}
+			vms, err := backend.GetPowerState()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "skipping %s: %s\n", name, err)
+				continue
+			}
+
+			label := backendNames[name]
+			if label == "" {
+				label = name
+			}
+
+			if len(vms) == 0 {
+				if multiBackend {
+					fmt.Printf("No %s VMs found\n\n", label)
+				} else {
+					fmt.Println("No VMs found")
+				}
+				continue
+			}
+
+			if multiBackend {
+				fmt.Println(label)
+			}
+
+			folders := make(map[string][]core.VM)
+			for _, vm := range vms {
+				folders[vm.Folder] = append(folders[vm.Folder], vm)
+			}
+
+			folderNames := make([]string, 0, len(folders))
+			for name := range folders {
+				folderNames = append(folderNames, name)
+			}
+			sort.Strings(folderNames)
+
+			for i, folder := range folderNames {
+				folderPrefix := "├──"
+				childPrefix := "│   "
+				if i == len(folderNames)-1 {
+					folderPrefix = "└──"
+					childPrefix = "    "
+				}
+				fmt.Printf("%s %s\n", folderPrefix, folder)
+
+				for j, vm := range folders[folder] {
+					status := "OFF"
+					if vm.Running {
+						status = "ON"
+					}
+					vmPrefix := childPrefix + "├──"
+					if j == len(folders[folder])-1 {
+						vmPrefix = childPrefix + "└──"
+					}
+					fmt.Printf("%s %s [%s]\n", vmPrefix, vm.Name, status)
+				}
+			}
+			total += len(vms)
+
+			if multiBackend {
+				fmt.Println()
+			}
+		}
+
+		if multiBackend && total == 0 {
+			fmt.Println("No VMs found")
 		}
 	},
 }

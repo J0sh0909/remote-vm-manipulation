@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 
 	"github.com/vbauerster/mpb/v8"
 )
@@ -98,13 +97,9 @@ func NewHypervisor(s Settings, hvFlag string) (Hypervisor, error) {
 		detected = append(detected, "vbox")
 	}
 
-	// Hyper-V: HYPERV_ENABLED=true or PowerShell Get-Command Get-VM succeeds
+	// Hyper-V: only when explicitly enabled via HYPERV_ENABLED=true in .env
 	if s.HyperVEnabled {
 		detected = append(detected, "hyperv")
-	} else if runtime.GOOS == "windows" {
-		if err := exec.Command("powershell", "-NoProfile", "-Command", "Get-Command Get-VM").Run(); err == nil {
-			detected = append(detected, "hyperv")
-		}
 	}
 
 	// Store detected hypervisors on settings for overview iteration
@@ -143,12 +138,9 @@ func DetectHypervisors(s Settings) []string {
 		detected = append(detected, "vbox")
 	}
 
+	// Hyper-V: only when explicitly enabled via HYPERV_ENABLED=true in .env
 	if s.HyperVEnabled {
 		detected = append(detected, "hyperv")
-	} else if runtime.GOOS == "windows" {
-		if err := exec.Command("powershell", "-NoProfile", "-Command", "Get-Command Get-VM").Run(); err == nil {
-			detected = append(detected, "hyperv")
-		}
 	}
 
 	return detected
