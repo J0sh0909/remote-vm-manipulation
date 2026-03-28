@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: 'rift command (e.g. overview, list, start MyVM)'
+        description: 'rift command'
         required: true
         type: string
 
@@ -24,10 +24,52 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build -o C:\actions-runner\rift.exe .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rift-binary
+          path: C:\actions-runner\rift.exe
 
-  command:
+  distribute-weak:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: [self-hosted, weak]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rift-binary
+      - run: copy rift.exe C:\actions-runner\rift.exe
+
+  distribute-tank:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: [self-hosted, tank]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rift-binary
+      - run: copy rift.exe C:\actions-runner\rift.exe
+
+  command-strong:
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, strong]
+    env:
+      ENV_PATH: C:/actions-runner/.env
+      RUNNER_TRACKING_ID: ""
+    steps:
+      - run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
+
+  command-weak:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, weak]
+    env:
+      ENV_PATH: C:/actions-runner/.env
+      RUNNER_TRACKING_ID: ""
+    steps:
+      - run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
+
+  command-tank:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, tank]
     env:
       ENV_PATH: C:/actions-runner/.env
       RUNNER_TRACKING_ID: ""
