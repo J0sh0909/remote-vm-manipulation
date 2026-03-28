@@ -10,10 +10,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/J0sh0909/rift/internal"
+	"github.com/J0sh0909/rift/internal/core"
 	"github.com/spf13/cobra"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
+
+	// Blank imports register backend factories via init().
+	_ "github.com/J0sh0909/rift/internal/aws"
+	_ "github.com/J0sh0909/rift/internal/hyperv"
+	_ "github.com/J0sh0909/rift/internal/proxmox"
+	_ "github.com/J0sh0909/rift/internal/vbox"
+	_ "github.com/J0sh0909/rift/internal/vmware"
 )
 
 // ---------------------------------------------------------------------------
@@ -68,6 +75,7 @@ var (
 	vpFlag                  string
 	tpmEncryptionPassFlag   string
 	tpmEncryptAllFlag       bool
+	hvFlag                  string
 )
 
 // ---------------------------------------------------------------------------
@@ -75,22 +83,22 @@ var (
 // ---------------------------------------------------------------------------
 
 var (
-	hv       internal.Hypervisor
-	settings internal.Settings
+	hv       core.Hypervisor
+	settings core.Settings
 	hvOnce   sync.Once
 	hvErr    error
 )
 
 func requireSettings() {
 	hvOnce.Do(func() {
-		settings, hvErr = internal.LoadSettings()
+		settings, hvErr = core.LoadSettings()
 		if hvErr != nil {
 			return
 		}
 		if vpFlag != "" {
 			settings.EncryptionPass = vpFlag
 		}
-		hv, hvErr = internal.NewHypervisor(settings)
+		hv, hvErr = core.NewHypervisor(settings, hvFlag)
 	})
 	if hvErr != nil {
 		fmt.Fprintln(os.Stderr, hvErr)
@@ -113,9 +121,9 @@ func exitOnErr(err error) {
 // Helper: power-off gate — skips VM and prints message if running and required
 // ---------------------------------------------------------------------------
 
-func requireOff(vm internal.VM, action string) bool {
-	if vm.Running && internal.RequiresPowerOff[action] {
-		internal.LogError(internal.ErrPower, vm.Name, "must be powered off to %s", action)
+func requireOff(vm core.VM, action string) bool {
+	if vm.Running && core.RequiresPowerOff[action] {
+		core.LogError(core.ErrPower, vm.Name, "must be powered off to %s", action)
 		return false
 	}
 	return true
@@ -131,7 +139,7 @@ type powerResult struct {
 	msg  string
 }
 
-func runPowerParallel(targets []internal.VM, action func(internal.VM) powerResult) {
+func runPowerParallel(targets []core.VM, action func(core.VM) powerResult) {
 	// Pre-read VMX files sequentially so goroutines don't all hit the
 	// filesystem at once (which disrupts vmrun timing on Windows).
 	paths := make([]string, len(targets))
@@ -146,7 +154,7 @@ func runPowerParallel(targets []internal.VM, action func(internal.VM) powerResul
 	// limiting parallelism.
 	results := runPowerBatch(targets, action)
 	for attempt := 1; attempt < 3; attempt++ {
-		var failed []internal.VM
+		var failed []core.VM
 		for _, r := range results {
 			if r.code != "" {
 				for _, vm := range targets {
@@ -175,14 +183,14 @@ func runPowerParallel(targets []internal.VM, action func(internal.VM) powerResul
 	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
 	for _, r := range results {
 		if r.code != "" {
-			internal.LogError(r.code, r.name, "%s", r.msg)
+			core.LogError(r.code, r.name, "%s", r.msg)
 		} else {
-			internal.LogInfo(r.name, r.msg)
+			core.LogInfo(r.name, r.msg)
 		}
 	}
 }
 
-func runPowerBatch(targets []internal.VM, action func(internal.VM) powerResult) []powerResult {
+func runPowerBatch(targets []core.VM, action func(core.VM) powerResult) []powerResult {
 	var (
 		mu      sync.Mutex
 		results []powerResult
@@ -190,7 +198,7 @@ func runPowerBatch(targets []internal.VM, action func(internal.VM) powerResult) 
 	)
 	for _, vm := range targets {
 		wg.Add(1)
-		go func(vm internal.VM) {
+		go func(vm core.VM) {
 			defer wg.Done()
 			r := action(vm)
 			mu.Lock()
@@ -223,7 +231,7 @@ var listCmd = &cobra.Command{
 		vms, err := hv.GetPowerState()
 		exitOnErr(err)
 
-		folders := make(map[string][]internal.VM)
+		folders := make(map[string][]core.VM)
 		for _, vm := range vms {
 			folders[vm.Folder] = append(folders[vm.Folder], vm)
 		}
@@ -269,67 +277,54 @@ var overviewCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		total := 0
 
-		// --- VMware Workstation ---
-		if s, err := internal.LoadSettings(); err == nil {
-			if h, err := internal.NewHypervisor(s); err == nil {
-				if vms, err := h.GetPowerState(); err == nil && len(vms) > 0 {
-					fmt.Println("VMware Workstation")
-					fmt.Println(strings.Repeat("-", 40))
-					for _, vm := range vms {
-						state := "off"
-						if vm.Running {
-							state = "running"
-						}
-						fmt.Printf("  %-30s %s\n", vm.Name, state)
-					}
-					total += len(vms)
-					fmt.Println()
+		s, _ := core.LoadSettings()
+		backendNames := map[string]string{
+			"workstation": "VMware Workstation",
+			"vbox":        "VirtualBox",
+			"hyperv":      "Hyper-V",
+			"proxmox":     "Proxmox",
+		}
+
+		detected := core.DetectHypervisors(s)
+		for _, name := range detected {
+			backend, err := core.CreateBackend(name, s)
+			if err != nil {
+				continue
+			}
+			vms, err := backend.GetPowerState()
+			if err != nil || len(vms) == 0 {
+				continue
+			}
+			label := backendNames[name]
+			if label == "" {
+				label = name
+			}
+			fmt.Println(label)
+			fmt.Println(strings.Repeat("-", 40))
+			for _, vm := range vms {
+				state := "off"
+				if vm.Running {
+					state = "running"
 				}
+				fmt.Printf("  %-30s %s\n", vm.Name, state)
 			}
-		}
-
-		// --- VirtualBox ---
-		if vboxVMs, err := internal.DetectVBoxVMs(); err == nil && len(vboxVMs) > 0 {
-			fmt.Println("VirtualBox")
-			fmt.Println(strings.Repeat("-", 40))
-			for _, vm := range vboxVMs {
-				fmt.Printf("  %-30s %s\n", vm.Name, vm.State)
-			}
-			total += len(vboxVMs)
-			fmt.Println()
-		}
-
-		// --- Hyper-V ---
-		if hvVMs, err := internal.DetectHyperVVMs(); err == nil && len(hvVMs) > 0 {
-			fmt.Println("Hyper-V")
-			fmt.Println(strings.Repeat("-", 40))
-			for _, vm := range hvVMs {
-				fmt.Printf("  %-30s %s\n", vm.Name, internal.HyperVStateName(vm.State))
-			}
-			total += len(hvVMs)
+			total += len(vms)
 			fmt.Println()
 		}
 
 		// --- AWS EC2 ---
-		awsS, _ := internal.LoadSettings()
-		region := awsS.AWSRegion
-		if ab, err := internal.NewAWSBackend(region); err == nil {
-			if instances, err := ab.ListInstances(false); err == nil && len(instances) > 0 {
+		if ab, err := core.CreateBackend("aws", s); err == nil {
+			if vms, err := ab.GetPowerState(); err == nil && len(vms) > 0 {
 				fmt.Println("AWS EC2")
-				fmt.Println(strings.Repeat("-", 80))
-				fmt.Printf("  %-20s %-12s %-12s %s\n", "NAME", "STATE", "TYPE", "PUBLIC IP")
-				for _, i := range instances {
-					name := i.Name
-					if name == "" {
-						name = i.ID
+				fmt.Println(strings.Repeat("-", 40))
+				for _, vm := range vms {
+					state := "off"
+					if vm.Running {
+						state = "running"
 					}
-					pub := i.PublicIP
-					if pub == "" {
-						pub = "-"
-					}
-					fmt.Printf("  %-20s %-12s %-12s %s\n", name, i.State, i.Type, pub)
+					fmt.Printf("  %-30s %s\n", vm.Name, state)
 				}
-				total += len(instances)
+				total += len(vms)
 				fmt.Println()
 			}
 		}
@@ -351,11 +346,11 @@ var infoCmd = &cobra.Command{
 	Short: "Show detailed VM info",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveAllVMs(hv, folderFlag, args)
+		targets, err := core.ResolveAllVMs(hv, folderFlag, args)
 		exitOnErr(err)
 
 		showAll := !netFlag && !specsFlag && !diskFlag && !cdromFlag && !displayFlag
-		pvnNames := internal.LoadPVNNames(settings.VmInventory)
+		pvnNames := core.LoadPVNNames(settings.VmInventory)
 
 		for i, vm := range targets {
 			status := "OFF"
@@ -368,9 +363,9 @@ var infoCmd = &cobra.Command{
 			hasPriorSection := false
 
 			if showAll || specsFlag {
-				specs, err := internal.ParseVMXSpecs(vm.Path)
+				specs, err := core.ParseVMXSpecs(vm.Path)
 				if err != nil {
-					internal.LogError(internal.ErrVMXRead, vm.Name, "error reading specs")
+					core.LogError(core.ErrVMXRead, vm.Name, "error reading specs")
 				} else {
 					fmt.Printf("├── CPU: %s vCPUs (%s sockets x %s cores)\n", specs.CPUCount, specs.Sockets, specs.CoresPerSocket)
 					fmt.Printf("├── RAM: %s MB\n", specs.MemoryMB)
@@ -381,9 +376,9 @@ var infoCmd = &cobra.Command{
 			}
 
 			if showAll || netFlag {
-				nics, err := internal.ParseVMXNetworking(vm.Path, pvnNames)
+				nics, err := core.ParseVMXNetworking(vm.Path, pvnNames)
 				if err != nil {
-					internal.LogError(internal.ErrVMXRead, vm.Name, "error reading NICs")
+					core.LogError(core.ErrVMXRead, vm.Name, "error reading NICs")
 				} else {
 					indent := ""
 					if hasPriorSection {
@@ -402,9 +397,9 @@ var infoCmd = &cobra.Command{
 			}
 
 			if showAll || diskFlag {
-				disks, err := internal.ParseVMXDisks(vm.Path)
+				disks, err := core.ParseVMXDisks(vm.Path)
 				if err != nil {
-					internal.LogError(internal.ErrVMXRead, vm.Name, "error reading disks")
+					core.LogError(core.ErrVMXRead, vm.Name, "error reading disks")
 				} else {
 					indent := ""
 					if hasPriorSection {
@@ -423,9 +418,9 @@ var infoCmd = &cobra.Command{
 			}
 
 			if showAll || cdromFlag {
-				drives, err := internal.ParseVMXCDDrives(vm.Path)
+				drives, err := core.ParseVMXCDDrives(vm.Path)
 				if err != nil {
-					internal.LogError(internal.ErrVMXRead, vm.Name, "error reading CD/DVD drives")
+					core.LogError(core.ErrVMXRead, vm.Name, "error reading CD/DVD drives")
 				} else if len(drives) > 0 {
 					indent := ""
 					if hasPriorSection {
@@ -448,9 +443,9 @@ var infoCmd = &cobra.Command{
 			}
 
 			if showAll || displayFlag {
-				disp, err := internal.ParseVMXDisplay(vm.Path)
+				disp, err := core.ParseVMXDisplay(vm.Path)
 				if err != nil {
-					internal.LogError(internal.ErrVMXRead, vm.Name, "error reading display")
+					core.LogError(core.ErrVMXRead, vm.Name, "error reading display")
 				} else {
 					indent := ""
 					if hasPriorSection {
@@ -478,31 +473,31 @@ var startCmd = &cobra.Command{
 	Short: "Start one or more VMs",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 		exitOnErr(hv.EnsureVMwareRunning())
 
 		if folderFlag == "" {
 			for _, vm := range targets {
 				if vm.Running {
-					internal.LogError(internal.ErrAlreadyRunning, vm.Name, "already running")
+					core.LogError(core.ErrAlreadyRunning, vm.Name, "already running")
 					continue
 				}
 				if err := hv.StartVM(vm.Path); err != nil {
-					internal.LogError(internal.ErrStartFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrStartFailed, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "started")
+				core.LogInfo(vm.Name, "started")
 			}
 			return
 		}
 
-		runPowerParallel(targets, func(vm internal.VM) powerResult {
+		runPowerParallel(targets, func(vm core.VM) powerResult {
 			if vm.Running {
-				return powerResult{vm.Name, internal.ErrAlreadyRunning, "already running"}
+				return powerResult{vm.Name, core.ErrAlreadyRunning, "already running"}
 			}
 			if err := hv.StartVM(vm.Path); err != nil {
-				return powerResult{vm.Name, internal.ErrStartFailed, err.Error()}
+				return powerResult{vm.Name, core.ErrStartFailed, err.Error()}
 			}
 			return powerResult{vm.Name, "", "started"}
 		})
@@ -514,13 +509,13 @@ var stopCmd = &cobra.Command{
 	Short: "Stop one or more VMs",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		if folderFlag == "" {
 			for _, vm := range targets {
 				if !vm.Running {
-					internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+					core.LogError(core.ErrAlreadyStopped, vm.Name, "already stopped")
 					continue
 				}
 				if hardFlag {
@@ -529,17 +524,17 @@ var stopCmd = &cobra.Command{
 					err = hv.StopVM(vm.Path)
 				}
 				if err != nil {
-					internal.LogError(internal.ErrStopFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrStopFailed, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "stopped")
+				core.LogInfo(vm.Name, "stopped")
 			}
 			return
 		}
 
-		runPowerParallel(targets, func(vm internal.VM) powerResult {
+		runPowerParallel(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
-				return powerResult{vm.Name, internal.ErrAlreadyStopped, "already stopped"}
+				return powerResult{vm.Name, core.ErrAlreadyStopped, "already stopped"}
 			}
 			var stopErr error
 			if hardFlag {
@@ -548,7 +543,7 @@ var stopCmd = &cobra.Command{
 				stopErr = hv.StopVM(vm.Path)
 			}
 			if stopErr != nil {
-				return powerResult{vm.Name, internal.ErrStopFailed, stopErr.Error()}
+				return powerResult{vm.Name, core.ErrStopFailed, stopErr.Error()}
 			}
 			return powerResult{vm.Name, "", "stopped"}
 		})
@@ -560,30 +555,30 @@ var suspendCmd = &cobra.Command{
 	Short: "Suspend one or more VMs",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		if folderFlag == "" {
 			for _, vm := range targets {
 				if !vm.Running {
-					internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+					core.LogError(core.ErrAlreadyStopped, vm.Name, "already stopped")
 					continue
 				}
 				if err := hv.SuspendVM(vm.Path); err != nil {
-					internal.LogError(internal.ErrSuspendFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrSuspendFailed, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "suspended")
+				core.LogInfo(vm.Name, "suspended")
 			}
 			return
 		}
 
-		runPowerParallel(targets, func(vm internal.VM) powerResult {
+		runPowerParallel(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
-				return powerResult{vm.Name, internal.ErrAlreadyStopped, "already stopped"}
+				return powerResult{vm.Name, core.ErrAlreadyStopped, "already stopped"}
 			}
 			if err := hv.SuspendVM(vm.Path); err != nil {
-				return powerResult{vm.Name, internal.ErrSuspendFailed, err.Error()}
+				return powerResult{vm.Name, core.ErrSuspendFailed, err.Error()}
 			}
 			return powerResult{vm.Name, "", "suspended"}
 		})
@@ -595,30 +590,30 @@ var resetCmd = &cobra.Command{
 	Short: "Reset one or more VMs",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		if folderFlag == "" {
 			for _, vm := range targets {
 				if !vm.Running {
-					internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+					core.LogError(core.ErrAlreadyStopped, vm.Name, "already stopped")
 					continue
 				}
 				if err := hv.ResetVM(vm.Path); err != nil {
-					internal.LogError(internal.ErrResetFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrResetFailed, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "reset")
+				core.LogInfo(vm.Name, "reset")
 			}
 			return
 		}
 
-		runPowerParallel(targets, func(vm internal.VM) powerResult {
+		runPowerParallel(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
-				return powerResult{vm.Name, internal.ErrAlreadyStopped, "already stopped"}
+				return powerResult{vm.Name, core.ErrAlreadyStopped, "already stopped"}
 			}
 			if err := hv.ResetVM(vm.Path); err != nil {
-				return powerResult{vm.Name, internal.ErrResetFailed, err.Error()}
+				return powerResult{vm.Name, core.ErrResetFailed, err.Error()}
 			}
 			return powerResult{vm.Name, "", "reset"}
 		})
@@ -630,26 +625,26 @@ var restartCmd = &cobra.Command{
 	Short: "Restart one or more VMs (hard stop then start)",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 		exitOnErr(hv.EnsureVMwareRunning())
 
 		if folderFlag == "" {
 			for _, vm := range targets {
 				if !vm.Running {
-					internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+					core.LogError(core.ErrAlreadyStopped, vm.Name, "already stopped")
 					continue
 				}
-				internal.LogInfo(vm.Name, "restarting...")
+				core.LogInfo(vm.Name, "restarting...")
 				if err := hv.StopVM(vm.Path, "hard"); err != nil {
-					internal.LogError(internal.ErrStopFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrStopFailed, vm.Name, "%s", err)
 					continue
 				}
 				if err := hv.StartVM(vm.Path); err != nil {
-					internal.LogError(internal.ErrStartFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrStartFailed, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "restarted")
+				core.LogInfo(vm.Name, "restarted")
 			}
 			return
 		}
@@ -657,21 +652,21 @@ var restartCmd = &cobra.Command{
 		// Folder mode: stop all in parallel, then start all in parallel.
 		var (
 			mu      sync.Mutex
-			stopped []internal.VM
+			stopped []core.VM
 			wg      sync.WaitGroup
 		)
 		// Phase 1: stop all
 		for _, vm := range targets {
 			if !vm.Running {
-				internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+				core.LogError(core.ErrAlreadyStopped, vm.Name, "already stopped")
 				continue
 			}
-			internal.LogInfo(vm.Name, "restarting...")
+			core.LogInfo(vm.Name, "restarting...")
 			wg.Add(1)
-			go func(vm internal.VM) {
+			go func(vm core.VM) {
 				defer wg.Done()
 				if err := hv.StopVM(vm.Path, "hard"); err != nil {
-					internal.LogError(internal.ErrStopFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrStopFailed, vm.Name, "%s", err)
 					return
 				}
 				mu.Lock()
@@ -685,11 +680,11 @@ var restartCmd = &cobra.Command{
 		var results []powerResult
 		for _, vm := range stopped {
 			wg.Add(1)
-			go func(vm internal.VM) {
+			go func(vm core.VM) {
 				defer wg.Done()
 				var r powerResult
 				if err := hv.StartVM(vm.Path); err != nil {
-					r = powerResult{vm.Name, internal.ErrStartFailed, err.Error()}
+					r = powerResult{vm.Name, core.ErrStartFailed, err.Error()}
 				} else {
 					r = powerResult{vm.Name, "", "restarted"}
 				}
@@ -703,9 +698,9 @@ var restartCmd = &cobra.Command{
 		sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
 		for _, r := range results {
 			if r.code != "" {
-				internal.LogError(r.code, r.name, "%s", r.msg)
+				core.LogError(r.code, r.name, "%s", r.msg)
 			} else {
-				internal.LogInfo(r.name, r.msg)
+				core.LogInfo(r.name, r.msg)
 			}
 		}
 	},
@@ -741,7 +736,7 @@ var execCmd = &cobra.Command{
 		script := strings.Join(cmdParts, " ")
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, vmArgs)
+		targets, err := core.ResolveTargets(hv, folderFlag, vmArgs)
 		exitOnErr(err)
 
 		user := execUserFlag
@@ -762,22 +757,22 @@ var execCmd = &cobra.Command{
 			output string
 		}
 
-		runOne := func(vm internal.VM) result {
+		runOne := func(vm core.VM) result {
 			if !vm.Running {
-				internal.LogError(internal.ErrNotRunning, vm.Name, "not running")
+				core.LogError(core.ErrNotRunning, vm.Name, "not running")
 				return result{vm.Name, ""}
 			}
-			guestOS := internal.GetGuestOS(vm.Path)
+			guestOS := core.GetGuestOS(vm.Path)
 			interpreter := execInterpreterFlag
 			if interpreter == "" {
 				var ok bool
-				interpreter, ok = internal.DefaultInterpreter(guestOS)
+				interpreter, ok = core.DefaultInterpreter(guestOS)
 				if !ok {
 					if guestOS == "" {
-						internal.LogError(internal.ErrGuestOSNotDet, vm.Name, "guest OS not set — use \"rift config os %s --set <guestOS>\" or specify --interpreter manually", vm.Name)
+						core.LogError(core.ErrGuestOSNotDet, vm.Name, "guest OS not set — use \"rift config os %s --set <guestOS>\" or specify --interpreter manually", vm.Name)
 						return result{vm.Name, ""}
 					}
-					internal.LogError(internal.ErrGuestOSNotDet, vm.Name, "unknown guest OS %q — specify --interpreter manually", guestOS)
+					core.LogError(core.ErrGuestOSNotDet, vm.Name, "unknown guest OS %q — specify --interpreter manually", guestOS)
 					return result{vm.Name, ""}
 				}
 			}
@@ -788,14 +783,14 @@ var execCmd = &cobra.Command{
 			if isWindows {
 				guestOutputPath := `C:\Windows\Temp\rift-exec-output.txt`
 				if _, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\rift-exec-output.txt`); err != nil {
-					internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
+					core.LogError(core.ErrGuestCmd, vm.Name, "%s", err)
 					return result{vm.Name, ""}
 				}
 
 				tmpFile, err := os.CreateTemp("", "rift-exec-*")
 				if err != nil {
 					_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
-					internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
+					core.LogError(core.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
 					return result{vm.Name, ""}
 				}
 				hostPath := tmpFile.Name()
@@ -804,7 +799,7 @@ var execCmd = &cobra.Command{
 				if err := hv.CopyFileFromGuest(vm.Path, user, pass, "", "", guestOutputPath, hostPath); err != nil {
 					os.Remove(hostPath)
 					_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
-					internal.LogError(internal.ErrOutputCapture, vm.Name, "%s", err)
+					core.LogError(core.ErrOutputCapture, vm.Name, "%s", err)
 					return result{vm.Name, ""}
 				}
 
@@ -812,7 +807,7 @@ var execCmd = &cobra.Command{
 				os.Remove(hostPath)
 				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 				if readErr != nil {
-					internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
+					core.LogError(core.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
 					return result{vm.Name, ""}
 				}
 				return result{vm.Name, string(data)}
@@ -821,14 +816,14 @@ var execCmd = &cobra.Command{
 			guestOutputPath := "/tmp/rift-exec-output.txt"
 			wrappedScript := script + " > /tmp/rift-exec-output.txt 2>&1"
 			if _, err := hv.RunGuestCommand(vm.Path, user, pass, interpreter, wrappedScript, "", ""); err != nil {
-				internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
+				core.LogError(core.ErrGuestCmd, vm.Name, "%s", err)
 				return result{vm.Name, ""}
 			}
 
 			tmpFile, err := os.CreateTemp("", "rift-exec-*")
 			if err != nil {
 				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
-				internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
+				core.LogError(core.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
 				return result{vm.Name, ""}
 			}
 			hostPath := tmpFile.Name()
@@ -837,7 +832,7 @@ var execCmd = &cobra.Command{
 			if err := hv.CopyFileFromGuest(vm.Path, user, pass, "", "", guestOutputPath, hostPath); err != nil {
 				os.Remove(hostPath)
 				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
-				internal.LogError(internal.ErrOutputCapture, vm.Name, "%s", err)
+				core.LogError(core.ErrOutputCapture, vm.Name, "%s", err)
 				return result{vm.Name, ""}
 			}
 
@@ -845,7 +840,7 @@ var execCmd = &cobra.Command{
 			os.Remove(hostPath)
 			_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 			if readErr != nil {
-				internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
+				core.LogError(core.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
 				return result{vm.Name, ""}
 			}
 
@@ -866,7 +861,7 @@ var execCmd = &cobra.Command{
 
 		for _, vm := range targets {
 			wg.Add(1)
-			go func(vm internal.VM) {
+			go func(vm core.VM) {
 				defer wg.Done()
 				r := runOne(vm)
 				mu.Lock()
@@ -894,7 +889,7 @@ var execCmd = &cobra.Command{
 
 // winCmd runs a single cmd.exe /c command in a Windows guest and returns any error.
 // The caller's user/pass are assumed to be admin-level; no hostname retry fallback.
-func winCmd(vm internal.VM, user, pass, arg string) error {
+func winCmd(vm core.VM, user, pass, arg string) error {
 	_, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+arg)
 	return err
 }
@@ -902,31 +897,31 @@ func winCmd(vm internal.VM, user, pass, arg string) error {
 // bootstrapRunLinux executes an inline bash command on a Linux guest via sudo.
 // The caller is responsible for checking vm.Running and guestOS before calling.
 // linuxInner is the command string run inside sudo -S bash -c '...'.
-func bootstrapRunLinux(vm internal.VM, user, pass, linuxInner, successMsg string) powerResult {
+func bootstrapRunLinux(vm core.VM, user, pass, linuxInner, successMsg string) powerResult {
 	if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash",
 		`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`, "", ""); err != nil {
-		return powerResult{vm.Name, internal.ErrBootstrapLinux, "failed: " + err.Error()}
+		return powerResult{vm.Name, core.ErrBootstrapLinux, "failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", successMsg}
 }
 
 // bootstrapWindowsCreate provisions the runner user on a Windows guest using
 // pure cmd.exe commands — no PowerShell or script download required.
-func bootstrapWindowsCreate(vm internal.VM, user, pass, ru, rp string) powerResult {
+func bootstrapWindowsCreate(vm core.VM, user, pass, ru, rp string) powerResult {
 	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add`); err != nil {
-		return powerResult{vm.Name, internal.ErrBootstrapWindows, "create user failed: " + err.Error()}
+		return powerResult{vm.Name, core.ErrBootstrapWindows, "create user failed: " + err.Error()}
 	}
 	// Add to local Administrators group; fall back to French locale name if needed.
 	if err := winCmd(vm, user, pass, `net localgroup Administrators `+ru+` /add`); err != nil {
 		if err2 := winCmd(vm, user, pass, `net localgroup Administrateurs `+ru+` /add`); err2 != nil {
-			return powerResult{vm.Name, internal.ErrBootstrapWindows, "add to admin group failed: " + err.Error()}
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "add to admin group failed: " + err.Error()}
 		}
 	}
 	if err := winCmd(vm, user, pass, `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f`); err != nil {
-		return powerResult{vm.Name, internal.ErrBootstrapWindows, "disable UAC failed: " + err.Error()}
+		return powerResult{vm.Name, core.ErrBootstrapWindows, "disable UAC failed: " + err.Error()}
 	}
 	if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' set PasswordExpires=FALSE`); err != nil {
-		return powerResult{vm.Name, internal.ErrBootstrapWindows, "disable password expiry failed: " + err.Error()}
+		return powerResult{vm.Name, core.ErrBootstrapWindows, "disable password expiry failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", "bootstrap complete"}
 }
@@ -934,7 +929,7 @@ func bootstrapWindowsCreate(vm internal.VM, user, pass, ru, rp string) powerResu
 // bootstrapWindowsVerify checks that the runner user is correctly provisioned
 // on a Windows guest using pure cmd.exe commands. Each check is printed inline
 // as [OK] or [FAIL]. Returns success only if all checks pass.
-func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
+func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	allOK := true
 
 	// Check 1: user exists.
@@ -986,23 +981,23 @@ func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
 	}
 
 	if !allOK {
-		return powerResult{vm.Name, internal.ErrBootstrapWindows, "verify failed"}
+		return powerResult{vm.Name, core.ErrBootstrapWindows, "verify failed"}
 	}
 	return powerResult{vm.Name, "", "verify passed"}
 }
 
 // bootstrapWindowsReset sets a new password for the runner user on a Windows guest.
-func bootstrapWindowsReset(vm internal.VM, user, pass, ru, rp string) powerResult {
+func bootstrapWindowsReset(vm core.VM, user, pass, ru, rp string) powerResult {
 	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp); err != nil {
-		return powerResult{vm.Name, internal.ErrBootstrapWindows, "password reset failed: " + err.Error()}
+		return powerResult{vm.Name, core.ErrBootstrapWindows, "password reset failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", "password reset complete"}
 }
 
 // bootstrapWindowsRevoke removes the runner user from a Windows guest.
-func bootstrapWindowsRevoke(vm internal.VM, user, pass, ru string) powerResult {
+func bootstrapWindowsRevoke(vm core.VM, user, pass, ru string) powerResult {
 	if err := winCmd(vm, user, pass, `net user `+ru+` /delete`); err != nil {
-		return powerResult{vm.Name, internal.ErrBootstrapWindows, "revoke failed: " + err.Error()}
+		return powerResult{vm.Name, core.ErrBootstrapWindows, "revoke failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", "revoke complete"}
 }
@@ -1044,13 +1039,13 @@ func bootstrapEffectiveRunnerUser() string {
 }
 
 // bootstrapDispatch runs action for a single VM (inline) or all targets in parallel (folder mode).
-func bootstrapDispatch(targets []internal.VM, action func(internal.VM) powerResult) {
+func bootstrapDispatch(targets []core.VM, action func(core.VM) powerResult) {
 	if folderFlag == "" {
 		r := action(targets[0])
 		if r.code != "" {
-			internal.LogError(r.code, r.name, "%s", r.msg)
+			core.LogError(r.code, r.name, "%s", r.msg)
 		} else {
-			internal.LogInfo(r.name, r.msg)
+			core.LogInfo(r.name, r.msg)
 		}
 		return
 	}
@@ -1078,7 +1073,7 @@ var bootstrapCreateCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
@@ -1087,13 +1082,13 @@ var bootstrapCreateCmd = &cobra.Command{
 		ru := bootstrapEffectiveRunnerUser()
 		rp := bootstrapRunnerPassFlag
 		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
-		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+		bootstrapDispatch(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
-				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+				return powerResult{vm.Name, core.ErrNotRunning, "not running"}
 			}
-			guestOS := internal.GetGuestOS(vm.Path)
+			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsCreate(vm, user, pass, ru, rp)
@@ -1111,7 +1106,7 @@ var bootstrapVerifyCmd = &cobra.Command{
 	Short: "Verify the automation user is correctly provisioned on a guest VM",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 		// Admin creds for system checks: --user/--pass → .env fallback.
 		adminUser, adminPass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
@@ -1122,13 +1117,13 @@ var bootstrapVerifyCmd = &cobra.Command{
 		runnerUser := settings.DefaultUser
 		runnerPass := settings.DefaultPass
 		ru := bootstrapEffectiveRunnerUser()
-		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+		bootstrapDispatch(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
-				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+				return powerResult{vm.Name, core.ErrNotRunning, "not running"}
 			}
-			guestOS := internal.GetGuestOS(vm.Path)
+			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
 			}
 			isWin := strings.HasPrefix(strings.ToLower(guestOS), "windows")
 			var r powerResult
@@ -1171,7 +1166,7 @@ var bootstrapResetCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
@@ -1180,13 +1175,13 @@ var bootstrapResetCmd = &cobra.Command{
 		ru := bootstrapEffectiveRunnerUser()
 		rp := bootstrapRunnerPassFlag
 		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
-		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+		bootstrapDispatch(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
-				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+				return powerResult{vm.Name, core.ErrNotRunning, "not running"}
 			}
-			guestOS := internal.GetGuestOS(vm.Path)
+			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsReset(vm, user, pass, ru, rp)
@@ -1204,20 +1199,20 @@ var bootstrapRevokeCmd = &cobra.Command{
 	Short: "Remove the automation user from a guest VM",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 		user, pass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
 		ru := bootstrapEffectiveRunnerUser()
-		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+		bootstrapDispatch(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
-				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+				return powerResult{vm.Name, core.ErrNotRunning, "not running"}
 			}
-			guestOS := internal.GetGuestOS(vm.Path)
+			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsRevoke(vm, user, pass, ru)
@@ -1244,7 +1239,7 @@ var snapshotCreateCmd = &cobra.Command{
 	Short: "Create a snapshot of one or more VMs",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
@@ -1252,8 +1247,8 @@ var snapshotCreateCmd = &cobra.Command{
 			if name == "" {
 				name = vm.Name + "-" + time.Now().Format("20060102-150405")
 			} else {
-				if err := internal.ValidateVMName(name); err != nil {
-					internal.LogError(internal.ErrSnapCreate, vm.Name, "invalid snapshot name: %s", err)
+				if err := core.ValidateVMName(name); err != nil {
+					core.LogError(core.ErrSnapCreate, vm.Name, "invalid snapshot name: %s", err)
 					continue
 				}
 			}
@@ -1264,36 +1259,36 @@ var snapshotCreateCmd = &cobra.Command{
 			if snapListErr == nil {
 				for _, s := range existingSnaps {
 					if s == name {
-						internal.LogError(internal.ErrSnapExists, vm.Name, "snapshot %q already exists", name)
+						core.LogError(core.ErrSnapExists, vm.Name, "snapshot %q already exists", name)
 						goto nextVM
 					}
 				}
 			}
 
 			if wasRunning {
-				internal.LogInfo(vm.Name, "running — suspending before snapshot")
+				core.LogInfo(vm.Name, "running — suspending before snapshot")
 				if err := hv.SuspendVM(vm.Path); err != nil {
-					internal.LogError(internal.ErrSuspendFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrSuspendFailed, vm.Name, "%s", err)
 					continue
 				}
 			}
 
 			if err := hv.CreateSnapshot(vm.Path, name); err != nil {
-				internal.LogError(internal.ErrSnapCreate, vm.Name, "%s", err)
+				core.LogError(core.ErrSnapCreate, vm.Name, "%s", err)
 				// Try to resume even if snapshot failed
 				if wasRunning {
 					_ = hv.StartVM(vm.Path)
 				}
 				continue
 			}
-			internal.LogInfo(vm.Name, "snapshot %q created", name)
+			core.LogInfo(vm.Name, "snapshot %q created", name)
 
 			if wasRunning {
 				if err := hv.StartVM(vm.Path); err != nil {
-					internal.LogError(internal.ErrSnapCreate, vm.Name, "snapshot created but failed to resume: %s", err)
+					core.LogError(core.ErrSnapCreate, vm.Name, "snapshot created but failed to resume: %s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "resumed")
+				core.LogInfo(vm.Name, "resumed")
 			}
 		nextVM:
 		}
@@ -1305,13 +1300,13 @@ var snapshotListCmd = &cobra.Command{
 	Short: "List snapshots for one or more VMs",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
 			snapshots, err := hv.ListSnapshots(vm.Path)
 			if err != nil {
-				internal.LogError(internal.ErrSnapshot, vm.Name, "%s", err)
+				core.LogError(core.ErrSnapshot, vm.Name, "%s", err)
 				continue
 			}
 			fmt.Printf("%s\n", vm.Name)
@@ -1357,7 +1352,7 @@ var snapshotRevertCmd = &cobra.Command{
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, vmArgs)
+		targets, err := core.ResolveTargets(hv, folderFlag, vmArgs)
 		exitOnErr(err)
 
 		if snapshotOriginFlag && !yesFlag {
@@ -1379,33 +1374,33 @@ var snapshotRevertCmd = &cobra.Command{
 			if snapshotOriginFlag {
 				snapshots, err := hv.ListSnapshots(vm.Path)
 				if err != nil {
-					internal.LogError(internal.ErrSnapRevert, vm.Name, "%s", err)
+					core.LogError(core.ErrSnapRevert, vm.Name, "%s", err)
 					continue
 				}
 				if len(snapshots) == 0 {
-					internal.LogError(internal.ErrSnapNotFound, vm.Name, "no snapshots found")
+					core.LogError(core.ErrSnapNotFound, vm.Name, "no snapshots found")
 					continue
 				}
 				origin := snapshots[0]
 				if err := hv.RevertToSnapshot(vm.Path, origin); err != nil {
-					internal.LogError(internal.ErrSnapRevert, vm.Name, "%s", err)
+					core.LogError(core.ErrSnapRevert, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "reverted to origin snapshot %q", origin)
+				core.LogInfo(vm.Name, "reverted to origin snapshot %q", origin)
 				for _, s := range snapshots {
 					if err := hv.DeleteSnapshot(vm.Path, s); err != nil {
-						internal.LogError(internal.ErrSnapDelete, vm.Name, "failed to delete snapshot %q: %s", s, err)
+						core.LogError(core.ErrSnapDelete, vm.Name, "failed to delete snapshot %q: %s", s, err)
 					}
 				}
-				internal.LogInfo(vm.Name, "all snapshots deleted")
+				core.LogInfo(vm.Name, "all snapshots deleted")
 				continue
 			}
 
 			if err := hv.RevertToSnapshot(vm.Path, snapName); err != nil {
-				internal.LogError(internal.ErrSnapRevert, vm.Name, "%s", err)
+				core.LogError(core.ErrSnapRevert, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "reverted to snapshot %q", snapName)
+			core.LogInfo(vm.Name, "reverted to snapshot %q", snapName)
 		}
 	},
 }
@@ -1437,7 +1432,7 @@ var snapshotDeleteCmd = &cobra.Command{
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, vmArgs)
+		targets, err := core.ResolveTargets(hv, folderFlag, vmArgs)
 		exitOnErr(err)
 
 		if snapshotCurrentFlag && !yesFlag {
@@ -1455,27 +1450,27 @@ var snapshotDeleteCmd = &cobra.Command{
 			if snapshotCurrentFlag {
 				snapshots, err := hv.ListSnapshots(vm.Path)
 				if err != nil {
-					internal.LogError(internal.ErrSnapshot, vm.Name, "%s", err)
+					core.LogError(core.ErrSnapshot, vm.Name, "%s", err)
 					continue
 				}
 				if len(snapshots) == 0 {
-					internal.LogError(internal.ErrSnapNotFound, vm.Name, "no snapshots")
+					core.LogError(core.ErrSnapNotFound, vm.Name, "no snapshots")
 					continue
 				}
 				for _, s := range snapshots {
 					if err := hv.DeleteSnapshot(vm.Path, s); err != nil {
-						internal.LogError(internal.ErrSnapDelete, vm.Name, "failed to delete snapshot %q: %s", s, err)
+						core.LogError(core.ErrSnapDelete, vm.Name, "failed to delete snapshot %q: %s", s, err)
 					}
 				}
-				internal.LogInfo(vm.Name, "all snapshots deleted")
+				core.LogInfo(vm.Name, "all snapshots deleted")
 				continue
 			}
 
 			if err := hv.DeleteSnapshot(vm.Path, snapName); err != nil {
-				internal.LogError(internal.ErrSnapDelete, vm.Name, "%s", err)
+				core.LogError(core.ErrSnapDelete, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "snapshot %q deleted", snapName)
+			core.LogInfo(vm.Name, "snapshot %q deleted", snapName)
 		}
 	},
 }
@@ -1497,29 +1492,29 @@ var archiveExportCmd = &cobra.Command{
 			fmt.Println("--format is required (ovf or ova)")
 			return
 		}
-		format, err := internal.ValidateFormat(archiveFormatFlag)
+		format, err := core.ValidateFormat(archiveFormatFlag)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 		if archiveNameFlag != "" {
-			if err := internal.ValidateVMName(archiveNameFlag); err != nil {
+			if err := core.ValidateVMName(archiveNameFlag); err != nil {
 				fmt.Printf("invalid --name: %s\n", err)
 				return
 			}
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		if settings.ArchivePath == "" {
-			internal.LogError(internal.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
+			core.LogError(core.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
 			return
 		}
 
 		if _, err := hv.FindOvftool(); err != nil {
-			internal.LogError(internal.ErrOvftoolNotFound, "", "%s", err)
+			core.LogError(core.ErrOvftoolNotFound, "", "%s", err)
 			return
 		}
 
@@ -1528,10 +1523,10 @@ var archiveExportCmd = &cobra.Command{
 		// resolveDestPath builds the destination path for a VM and creates its
 		// directory. Returns ("", false) and prints a message on failure.
 		type exportJob struct {
-			vm       internal.VM
+			vm       core.VM
 			destPath string
 		}
-		resolveDestPath := func(vm internal.VM) (string, bool) {
+		resolveDestPath := func(vm core.VM) (string, bool) {
 			label := vm.Name
 			if archiveNameFlag != "" {
 				if folderFlag != "" {
@@ -1560,7 +1555,7 @@ var archiveExportCmd = &cobra.Command{
 					dir = filepath.Join(settings.ArchivePath, "OVF", label, versionDir)
 				}
 				if err := os.MkdirAll(dir, 0755); err != nil {
-					internal.LogError(internal.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
+					core.LogError(core.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
 					return "", false
 				}
 				destPath = filepath.Join(dir, label+".ovf")
@@ -1571,7 +1566,7 @@ var archiveExportCmd = &cobra.Command{
 					dir = filepath.Join(settings.ArchivePath, "OVA", label)
 				}
 				if err := os.MkdirAll(dir, 0755); err != nil {
-					internal.LogError(internal.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
+					core.LogError(core.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
 					return "", false
 				}
 				destPath = filepath.Join(dir, label+"-"+hvID+"-"+ts+".ova")
@@ -1590,7 +1585,7 @@ var archiveExportCmd = &cobra.Command{
 				if !ok {
 					continue
 				}
-				internal.LogInfo(vm.Name, "exporting as %s to %s", strings.ToUpper(format), destPath)
+				core.LogInfo(vm.Name, "exporting as %s to %s", strings.ToUpper(format), destPath)
 				jobs = append(jobs, exportJob{vm, destPath})
 			}
 			if len(jobs) == 0 {
@@ -1642,9 +1637,9 @@ var archiveExportCmd = &cobra.Command{
 			p.Wait()
 			for _, r := range results {
 				if r.err != nil {
-					internal.LogError(internal.ErrExportFailed, r.name, "%s", r.err)
+					core.LogError(core.ErrExportFailed, r.name, "%s", r.err)
 				} else {
-					internal.LogInfo(r.name, "export complete")
+					core.LogInfo(r.name, "export complete")
 				}
 			}
 		} else {
@@ -1657,12 +1652,12 @@ var archiveExportCmd = &cobra.Command{
 				if !ok {
 					continue
 				}
-				internal.LogInfo(vm.Name, "exporting as %s to %s", strings.ToUpper(format), destPath)
+				core.LogInfo(vm.Name, "exporting as %s to %s", strings.ToUpper(format), destPath)
 				if err := hv.ExportVM(vm.Path, destPath); err != nil {
-					internal.LogError(internal.ErrExportFailed, vm.Name, "%s", err)
+					core.LogError(core.ErrExportFailed, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "export complete")
+				core.LogInfo(vm.Name, "export complete")
 			}
 		}
 	},
@@ -1689,29 +1684,29 @@ var archiveImportCmd = &cobra.Command{
 		requireSettings()
 
 		if settings.ArchivePath == "" {
-			internal.LogError(internal.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
+			core.LogError(core.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
 			return
 		}
 
 		if _, err := hv.FindOvftool(); err != nil {
-			internal.LogError(internal.ErrOvftoolNotFound, "", "%s", err)
+			core.LogError(core.ErrOvftoolNotFound, "", "%s", err)
 			return
 		}
 
-		entries, err := internal.ScanArchives(settings.ArchivePath)
+		entries, err := core.ScanArchives(settings.ArchivePath)
 		if err != nil {
-			internal.LogError(internal.ErrArchive, "", "%s", err)
+			core.LogError(core.ErrArchive, "", "%s", err)
 			return
 		}
 
-		var matches []internal.ArchiveEntry
+		var matches []core.ArchiveEntry
 		if archiveLatestFlag || archiveOldestFlag {
 			var fmtFilter string
 			if archiveFormatFlag != "" {
 				var fmtErr error
-				fmtFilter, fmtErr = internal.ValidateFormat(archiveFormatFlag)
+				fmtFilter, fmtErr = core.ValidateFormat(archiveFormatFlag)
 				if fmtErr != nil {
-					internal.LogError(internal.ErrArchive, "", "%s", fmtErr)
+					core.LogError(core.ErrArchive, "", "%s", fmtErr)
 					return
 				}
 			}
@@ -1725,16 +1720,16 @@ var archiveImportCmd = &cobra.Command{
 				matches = append(matches, e)
 			}
 			if len(matches) == 0 {
-				internal.LogError(internal.ErrArchive, "", "no archives found for VM %q", target)
+				core.LogError(core.ErrArchive, "", "no archives found for VM %q", target)
 				return
 			}
 			sort.Slice(matches, func(i, j int) bool {
 				return matches[i].Version < matches[j].Version
 			})
 			if archiveLatestFlag {
-				matches = []internal.ArchiveEntry{matches[len(matches)-1]}
+				matches = []core.ArchiveEntry{matches[len(matches)-1]}
 			} else {
-				matches = []internal.ArchiveEntry{matches[0]}
+				matches = []core.ArchiveEntry{matches[0]}
 			}
 		} else {
 			for _, e := range entries {
@@ -1743,12 +1738,12 @@ var archiveImportCmd = &cobra.Command{
 				}
 			}
 			if len(matches) == 0 {
-				internal.LogError(internal.ErrArchive, "", "no archive found with name %q", target)
+				core.LogError(core.ErrArchive, "", "no archive found with name %q", target)
 				return
 			}
 		}
 
-		var chosen internal.ArchiveEntry
+		var chosen core.ArchiveEntry
 		if len(matches) == 1 {
 			chosen = matches[0]
 		} else {
@@ -1771,7 +1766,7 @@ var archiveImportCmd = &cobra.Command{
 		if chosen.Format == "OVF" {
 			ovfFiles, err := filepath.Glob(filepath.Join(chosen.Path, "*.ovf"))
 			if err != nil || len(ovfFiles) == 0 {
-				internal.LogError(internal.ErrImportFailed, "", "no .ovf file found in %s", chosen.Path)
+				core.LogError(core.ErrImportFailed, "", "no .ovf file found in %s", chosen.Path)
 				return
 			}
 			srcPath = ovfFiles[0]
@@ -1783,35 +1778,35 @@ var archiveImportCmd = &cobra.Command{
 		if name == "" {
 			name = chosen.VMName
 		}
-		if err := internal.ValidateVMName(name); err != nil {
+		if err := core.ValidateVMName(name); err != nil {
 			fmt.Printf("invalid VM name %q: %s\nUse --name to specify a valid name\n", name, err)
 			return
 		}
 
 		destDir := filepath.Join(settings.VmDirectory, name)
 		if err := os.MkdirAll(destDir, 0755); err != nil {
-			internal.LogError(internal.ErrImportFailed, "", "failed to create VM directory: %s", err)
+			core.LogError(core.ErrImportFailed, "", "failed to create VM directory: %s", err)
 			return
 		}
 		destVmx := filepath.Join(destDir, name+".vmx")
 
 		fmt.Printf("importing [%s] %s → %s\n", chosen.Format, chosen.Version, destVmx)
 		if err := hv.ImportVM(srcPath, destVmx); err != nil {
-			internal.LogError(internal.ErrImportFailed, name, "%s", err)
+			core.LogError(core.ErrImportFailed, name, "%s", err)
 			return
 		}
-		internal.LogInfo(name, "import complete")
+		core.LogInfo(name, "import complete")
 
-		internal.LogInfo(name, "registering with VMware...")
+		core.LogInfo(name, "registering with VMware...")
 		if err := hv.StartVM(destVmx); err != nil {
-			internal.LogError(internal.ErrImportFailed, name, "failed to register (start): %s", err)
+			core.LogError(core.ErrImportFailed, name, "failed to register (start): %s", err)
 			return
 		}
 		if err := hv.StopVM(destVmx, "hard"); err != nil {
-			internal.LogError(internal.ErrImportFailed, name, "failed to register (stop): %s", err)
+			core.LogError(core.ErrImportFailed, name, "failed to register (stop): %s", err)
 			return
 		}
-		internal.LogInfo(name, "registered and powered off")
+		core.LogInfo(name, "registered and powered off")
 	},
 }
 
@@ -1822,13 +1817,13 @@ var archiveListCmd = &cobra.Command{
 		requireSettings()
 
 		if settings.ArchivePath == "" {
-			internal.LogError(internal.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
+			core.LogError(core.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
 			return
 		}
 
-		entries, err := internal.ScanArchives(settings.ArchivePath)
+		entries, err := core.ScanArchives(settings.ArchivePath)
 		if err != nil {
-			internal.LogError(internal.ErrArchive, "", "%s", err)
+			core.LogError(core.ErrArchive, "", "%s", err)
 			return
 		}
 		if len(entries) == 0 {
@@ -1838,7 +1833,7 @@ var archiveListCmd = &cobra.Command{
 
 		type groupKey struct{ Folder, VMName string }
 		var order []groupKey
-		groups := map[groupKey][]internal.ArchiveEntry{}
+		groups := map[groupKey][]core.ArchiveEntry{}
 		for _, e := range entries {
 			k := groupKey{e.Folder, e.VMName}
 			if _, exists := groups[k]; !exists {
@@ -1889,24 +1884,24 @@ var archiveDeleteCmd = &cobra.Command{
 		requireSettings()
 
 		if settings.ArchivePath == "" {
-			internal.LogError(internal.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
+			core.LogError(core.ErrMissingSetting, "", "ARCHIVE_PATH is not set in .env")
 			return
 		}
 
-		entries, err := internal.ScanArchives(settings.ArchivePath)
+		entries, err := core.ScanArchives(settings.ArchivePath)
 		if err != nil {
-			internal.LogError(internal.ErrArchive, "", "%s", err)
+			core.LogError(core.ErrArchive, "", "%s", err)
 			return
 		}
 
-		var matches []internal.ArchiveEntry
+		var matches []core.ArchiveEntry
 		if archiveLatestFlag || archiveOldestFlag {
 			var fmtFilter string
 			if archiveFormatFlag != "" {
 				var fmtErr error
-				fmtFilter, fmtErr = internal.ValidateFormat(archiveFormatFlag)
+				fmtFilter, fmtErr = core.ValidateFormat(archiveFormatFlag)
 				if fmtErr != nil {
-					internal.LogError(internal.ErrArchive, "", "%s", fmtErr)
+					core.LogError(core.ErrArchive, "", "%s", fmtErr)
 					return
 				}
 			}
@@ -1920,16 +1915,16 @@ var archiveDeleteCmd = &cobra.Command{
 				matches = append(matches, e)
 			}
 			if len(matches) == 0 {
-				internal.LogError(internal.ErrArchive, "", "no archives found for VM %q", target)
+				core.LogError(core.ErrArchive, "", "no archives found for VM %q", target)
 				return
 			}
 			sort.Slice(matches, func(i, j int) bool {
 				return matches[i].Version < matches[j].Version
 			})
 			if archiveLatestFlag {
-				matches = []internal.ArchiveEntry{matches[len(matches)-1]}
+				matches = []core.ArchiveEntry{matches[len(matches)-1]}
 			} else {
-				matches = []internal.ArchiveEntry{matches[0]}
+				matches = []core.ArchiveEntry{matches[0]}
 			}
 		} else {
 			for _, e := range entries {
@@ -1937,9 +1932,9 @@ var archiveDeleteCmd = &cobra.Command{
 					continue
 				}
 				if archiveFormatFlag != "" {
-					norm, err := internal.ValidateFormat(archiveFormatFlag)
+					norm, err := core.ValidateFormat(archiveFormatFlag)
 					if err != nil {
-						internal.LogError(internal.ErrArchive, "", "%s", err)
+						core.LogError(core.ErrArchive, "", "%s", err)
 						return
 					}
 					if strings.ToLower(e.Format) != norm {
@@ -1950,9 +1945,9 @@ var archiveDeleteCmd = &cobra.Command{
 			}
 			if len(matches) == 0 {
 				if archiveFormatFlag != "" {
-					internal.LogError(internal.ErrArchive, "", "no %s archive found with name %q", strings.ToUpper(archiveFormatFlag), target)
+					core.LogError(core.ErrArchive, "", "no %s archive found with name %q", strings.ToUpper(archiveFormatFlag), target)
 				} else {
-					internal.LogError(internal.ErrArchive, "", "no archive found with name %q", target)
+					core.LogError(core.ErrArchive, "", "no archive found with name %q", target)
 				}
 				return
 			}
@@ -1974,7 +1969,7 @@ var archiveDeleteCmd = &cobra.Command{
 
 		for _, m := range matches {
 			if err := os.RemoveAll(m.Path); err != nil {
-				internal.LogError(internal.ErrArchive, "", "failed to delete [%s] %s: %s", m.Format, m.Version, err)
+				core.LogError(core.ErrArchive, "", "failed to delete [%s] %s: %s", m.Format, m.Version, err)
 				continue
 			}
 			fmt.Printf("[%s] %s → deleted\n", m.Format, m.Version)
@@ -2014,13 +2009,13 @@ var configCpuCmd = &cobra.Command{
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		// Hardware validation
-		host, _ := internal.DetectHostResources()
-		if err := internal.ValidateCPU(host, socketsFlag, coresFlag); err != nil {
-			internal.LogError(internal.ErrCPUConfig, "", "%s", err)
+		host, _ := core.DetectHostResources()
+		if err := core.ValidateCPU(host, socketsFlag, coresFlag); err != nil {
+			core.LogError(core.ErrCPUConfig, "", "%s", err)
 			return
 		}
 
@@ -2030,17 +2025,17 @@ var configCpuCmd = &cobra.Command{
 			if !requireOff(vm, "change CPU") {
 				continue
 			}
-			err = internal.SetVMXKey(vm.Path, "numvcpus", fmt.Sprintf("%d", totalCPUs))
+			err = core.SetVMXKey(vm.Path, "numvcpus", fmt.Sprintf("%d", totalCPUs))
 			if err != nil {
-				internal.LogError(internal.ErrCPUConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrCPUConfig, vm.Name, "%s", err)
 				continue
 			}
-			err = internal.SetVMXKey(vm.Path, "cpuid.coresPerSocket", fmt.Sprintf("%d", coresFlag))
+			err = core.SetVMXKey(vm.Path, "cpuid.coresPerSocket", fmt.Sprintf("%d", coresFlag))
 			if err != nil {
-				internal.LogError(internal.ErrCPUConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrCPUConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "CPU: %d vCPUs (%d sockets x %d cores)", totalCPUs, socketsFlag, coresFlag)
+			core.LogInfo(vm.Name, "CPU: %d vCPUs (%d sockets x %d cores)", totalCPUs, socketsFlag, coresFlag)
 		}
 	},
 }
@@ -2059,28 +2054,28 @@ var configRamCmd = &cobra.Command{
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		// Hardware validation
-		host, _ := internal.DetectHostResources()
-		if err := internal.ValidateRAM(host, ramFlag); err != nil {
-			internal.LogError(internal.ErrRAMConfig, "", "%s", err)
+		host, _ := core.DetectHostResources()
+		if err := core.ValidateRAM(host, ramFlag); err != nil {
+			core.LogError(core.ErrRAMConfig, "", "%s", err)
 			return
 		}
 
-		memMB := internal.GBtoMB(ramFlag)
+		memMB := core.GBtoMB(ramFlag)
 
 		for _, vm := range targets {
 			if !requireOff(vm, "change RAM") {
 				continue
 			}
-			err = internal.SetVMXKey(vm.Path, "memsize", fmt.Sprintf("%d", memMB))
+			err = core.SetVMXKey(vm.Path, "memsize", fmt.Sprintf("%d", memMB))
 			if err != nil {
-				internal.LogError(internal.ErrRAMConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrRAMConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "RAM: %d GB (%d MB)", ramFlag, memMB)
+			core.LogInfo(vm.Name, "RAM: %d GB (%d MB)", ramFlag, memMB)
 		}
 	},
 }
@@ -2099,14 +2094,14 @@ var configDisplayCmd = &cobra.Command{
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		// Hardware validation for gfx memory
 		if gfxMemFlag > 0 {
-			host, _ := internal.DetectHostResources()
-			if err := internal.ValidateGfxMem(host, gfxMemFlag); err != nil {
-				internal.LogError(internal.ErrDisplayConfig, "", "%s", err)
+			host, _ := core.DetectHostResources()
+			if err := core.ValidateGfxMem(host, gfxMemFlag); err != nil {
+				core.LogError(core.ErrDisplayConfig, "", "%s", err)
 				return
 			}
 		}
@@ -2120,21 +2115,21 @@ var configDisplayCmd = &cobra.Command{
 				if strings.EqualFold(accel3dFlag, "on") {
 					val = "TRUE"
 				}
-				err := internal.SetVMXKey(vm.Path, "mks.enable3d", val)
+				err := core.SetVMXKey(vm.Path, "mks.enable3d", val)
 				if err != nil {
-					internal.LogError(internal.ErrDisplayConfig, vm.Name, "%s", err)
+					core.LogError(core.ErrDisplayConfig, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "3D Acceleration: %s", accel3dFlag)
+				core.LogInfo(vm.Name, "3D Acceleration: %s", accel3dFlag)
 			}
 			if gfxMemFlag > 0 {
-				kb := internal.MBtoKB(gfxMemFlag)
-				err := internal.SetVMXKey(vm.Path, "svga.graphicsMemoryKB", fmt.Sprintf("%d", kb))
+				kb := core.MBtoKB(gfxMemFlag)
+				err := core.SetVMXKey(vm.Path, "svga.graphicsMemoryKB", fmt.Sprintf("%d", kb))
 				if err != nil {
-					internal.LogError(internal.ErrDisplayConfig, vm.Name, "%s", err)
+					core.LogError(core.ErrDisplayConfig, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "Graphics Memory: %d MB (%d KB)", gfxMemFlag, kb)
+				core.LogInfo(vm.Name, "Graphics Memory: %d MB (%d KB)", gfxMemFlag, kb)
 			}
 		}
 	},
@@ -2149,22 +2144,22 @@ var configOsCmd = &cobra.Command{
 	Short: "Get or set the guestOS VMX key",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
 			if osSetFlag != "" {
 				if vm.Running {
-					internal.LogError(internal.ErrOSConfig, vm.Name, "must be powered off to change guestOS")
+					core.LogError(core.ErrOSConfig, vm.Name, "must be powered off to change guestOS")
 					continue
 				}
-				if err := internal.SetVMXKey(vm.Path, "guestOS", osSetFlag); err != nil {
-					internal.LogError(internal.ErrOSConfig, vm.Name, "%s", err)
+				if err := core.SetVMXKey(vm.Path, "guestOS", osSetFlag); err != nil {
+					core.LogError(core.ErrOSConfig, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "guestOS: %s", osSetFlag)
+				core.LogInfo(vm.Name, "guestOS: %s", osSetFlag)
 			} else {
-				guestOS := internal.GetGuestOS(vm.Path)
+				guestOS := core.GetGuestOS(vm.Path)
 				if guestOS == "" {
 					fmt.Printf("%s → guestOS: (not set) — use \"rift config os %s --set <guestOS>\" to set it\n", vm.Name, vm.Name)
 				} else {
@@ -2184,13 +2179,13 @@ var configTpmCmd = &cobra.Command{
 	Short: "Show TPM status for a VM",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
-			data, err := internal.ParseVMXKeys(vm.Path)
+			data, err := core.ParseVMXKeys(vm.Path)
 			if err != nil {
-				internal.LogError(internal.ErrTPMConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrTPMConfig, vm.Name, "%s", err)
 				continue
 			}
 			vtpmPresent := strings.EqualFold(data["vtpm.present"], "TRUE")
@@ -2217,7 +2212,7 @@ var configTpmAddCmd = &cobra.Command{
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
@@ -2232,8 +2227,8 @@ var configTpmAddCmd = &cobra.Command{
 				keys["encryption.encryptedvmx"] = "TRUE"
 			}
 			for k, v := range keys {
-				if err := internal.SetVMXKey(vm.Path, k, v); err != nil {
-					internal.LogError(internal.ErrTPMConfig, vm.Name, "%s", err)
+				if err := core.SetVMXKey(vm.Path, k, v); err != nil {
+					core.LogError(core.ErrTPMConfig, vm.Name, "%s", err)
 					continue
 				}
 			}
@@ -2241,7 +2236,7 @@ var configTpmAddCmd = &cobra.Command{
 			if tpmEncryptAllFlag {
 				encDesc = "full VM"
 			}
-			internal.LogInfo(vm.Name, "TPM added (encryption: %s, password set via --encryption-pass)", encDesc)
+			core.LogInfo(vm.Name, "TPM added (encryption: %s, password set via --encryption-pass)", encDesc)
 		}
 	},
 }
@@ -2251,7 +2246,7 @@ var configTpmRemoveCmd = &cobra.Command{
 	Short: "Remove the virtual TPM from a VM",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
@@ -2259,9 +2254,9 @@ var configTpmRemoveCmd = &cobra.Command{
 				continue
 			}
 			for _, key := range []string{"managedvm.autoAddVTPM", "vtpm.present", "encryption.encryptedvmx"} {
-				_ = internal.RemoveVMXKey(vm.Path, key)
+				_ = core.RemoveVMXKey(vm.Path, key)
 			}
-			internal.LogInfo(vm.Name, "TPM removed")
+			core.LogInfo(vm.Name, "TPM removed")
 		}
 	},
 }
@@ -2276,7 +2271,7 @@ var networksCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
 
-		networks, err := internal.LoadVirtualNetworks(settings.NetmapPath)
+		networks, err := core.LoadVirtualNetworks(settings.NetmapPath)
 		exitOnErr(err)
 
 		fmt.Println("Virtual Networks:")
@@ -2284,7 +2279,7 @@ var networksCmd = &cobra.Command{
 			fmt.Printf("  %s - %s (%s)\n", net.Device, net.Name, net.Type)
 		}
 
-		pvnNames := internal.LoadPVNNames(settings.VmInventory)
+		pvnNames := core.LoadPVNNames(settings.VmInventory)
 		if len(pvnNames) > 0 {
 			fmt.Println("\nLAN Segments:")
 			for _, name := range pvnNames {
@@ -2312,7 +2307,7 @@ var configNicCmd = &cobra.Command{
 		}
 
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
@@ -2320,46 +2315,46 @@ var configNicCmd = &cobra.Command{
 				if !requireOff(vm, "add NIC") {
 					continue
 				}
-				index, err := internal.AddNIC(vm.Path, nicTypeFlag, vnetFlag)
+				index, err := core.AddNIC(vm.Path, nicTypeFlag, vnetFlag)
 				if err != nil {
-					internal.LogError(internal.ErrNetConfig, vm.Name, "%s", err)
+					core.LogError(core.ErrNetConfig, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "added NIC %d (%s)", index, nicTypeFlag)
+				core.LogInfo(vm.Name, "added NIC %d (%s)", index, nicTypeFlag)
 
 			} else if removeNicFlag {
 				if !requireOff(vm, "remove NIC") {
 					continue
 				}
-				err := internal.RemoveNIC(vm.Path, nicIndexFlag)
+				err := core.RemoveNIC(vm.Path, nicIndexFlag)
 				if err != nil {
-					internal.LogError(internal.ErrNetConfig, vm.Name, "%s", err)
+					core.LogError(core.ErrNetConfig, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "removed NIC %d", nicIndexFlag)
+				core.LogInfo(vm.Name, "removed NIC %d", nicIndexFlag)
 
 			} else if regenMacFlag {
 				if !requireOff(vm, "regenerate MAC") {
 					continue
 				}
-				err := internal.RegenMAC(vm.Path, nicIndexFlag)
+				err := core.RegenMAC(vm.Path, nicIndexFlag)
 				if err != nil {
-					internal.LogError(internal.ErrNetConfig, vm.Name, "%s", err)
+					core.LogError(core.ErrNetConfig, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "NIC %d MAC will regenerate on next boot", nicIndexFlag)
+				core.LogInfo(vm.Name, "NIC %d MAC will regenerate on next boot", nicIndexFlag)
 
 			} else {
-				if vm.Running && internal.RequiresPowerOff["nic-type"] {
-					internal.LogError(internal.ErrNetConfig, vm.Name, "must be powered off to change NIC type")
+				if vm.Running && core.RequiresPowerOff["nic-type"] {
+					core.LogError(core.ErrNetConfig, vm.Name, "must be powered off to change NIC type")
 					continue
 				}
-				err := internal.SetNICType(vm.Path, nicIndexFlag, nicTypeFlag, vnetFlag)
+				err := core.SetNICType(vm.Path, nicIndexFlag, nicTypeFlag, vnetFlag)
 				if err != nil {
-					internal.LogError(internal.ErrNetConfig, vm.Name, "%s", err)
+					core.LogError(core.ErrNetConfig, vm.Name, "%s", err)
 					continue
 				}
-				internal.LogInfo(vm.Name, "NIC %d changed to %s", nicIndexFlag, nicTypeFlag)
+				core.LogInfo(vm.Name, "NIC %d changed to %s", nicIndexFlag, nicTypeFlag)
 			}
 		}
 	},
@@ -2383,15 +2378,15 @@ var configDiskAddCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		// Hardware validation for pre-allocated disks (bit 2 set)
 		if diskTypeFlag&2 != 0 {
-			host, _ := internal.DetectHostResources()
+			host, _ := core.DetectHostResources()
 			for _, vm := range targets {
-				if err := internal.ValidateDiskSpace(host, vm.Path, diskSizeFlag); err != nil {
-					internal.LogError(internal.ErrDiskConfig, vm.Name, "%s", err)
+				if err := core.ValidateDiskSpace(host, vm.Path, diskSizeFlag); err != nil {
+					core.LogError(core.ErrDiskConfig, vm.Name, "%s", err)
 					return
 				}
 			}
@@ -2401,12 +2396,12 @@ var configDiskAddCmd = &cobra.Command{
 			if !requireOff(vm, "add a disk") {
 				continue
 			}
-			slot, err := internal.CreateDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSizeFlag, diskTypeFlag)
+			slot, err := core.CreateDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSizeFlag, diskTypeFlag)
 			if err != nil {
-				internal.LogError(internal.ErrDiskConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrDiskConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "added disk at %s (%dGB)", slot, diskSizeFlag)
+			core.LogInfo(vm.Name, "added disk at %s (%dGB)", slot, diskSizeFlag)
 		}
 	},
 }
@@ -2420,19 +2415,19 @@ var configDiskRemoveCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
 			if !requireOff(vm, "remove a disk") {
 				continue
 			}
-			err := internal.RemoveDisk(vm.Path, diskControllerFlag, diskSlotFlag, deleteFilesFlag)
+			err := core.RemoveDisk(vm.Path, diskControllerFlag, diskSlotFlag, deleteFilesFlag)
 			if err != nil {
-				internal.LogError(internal.ErrDiskConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrDiskConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "removed disk %s:%d", diskControllerFlag, diskSlotFlag)
+			core.LogInfo(vm.Name, "removed disk %s:%d", diskControllerFlag, diskSlotFlag)
 		}
 	},
 }
@@ -2446,19 +2441,19 @@ var configDiskExpandCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
 			if !requireOff(vm, "expand a disk") {
 				continue
 			}
-			err := internal.ExpandDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSlotFlag, diskSizeFlag)
+			err := core.ExpandDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSlotFlag, diskSizeFlag)
 			if err != nil {
-				internal.LogError(internal.ErrDiskConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrDiskConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "expanded %s:%d to %dGB", diskControllerFlag, diskSlotFlag, diskSizeFlag)
+			core.LogInfo(vm.Name, "expanded %s:%d to %dGB", diskControllerFlag, diskSlotFlag, diskSizeFlag)
 		}
 	},
 }
@@ -2472,19 +2467,19 @@ var configDiskDefragCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
 			if !requireOff(vm, "defragment a disk") {
 				continue
 			}
-			err := internal.DefragDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSlotFlag)
+			err := core.DefragDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSlotFlag)
 			if err != nil {
-				internal.LogError(internal.ErrDiskConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrDiskConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "defragmented %s:%d", diskControllerFlag, diskSlotFlag)
+			core.LogInfo(vm.Name, "defragmented %s:%d", diskControllerFlag, diskSlotFlag)
 		}
 	},
 }
@@ -2498,19 +2493,19 @@ var configDiskCompactCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
 			if !requireOff(vm, "compact a disk") {
 				continue
 			}
-			err := internal.CompactDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSlotFlag)
+			err := core.CompactDisk(settings.VdiskPath, vm.Path, diskControllerFlag, diskSlotFlag)
 			if err != nil {
-				internal.LogError(internal.ErrDiskConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrDiskConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "compacted %s:%d", diskControllerFlag, diskSlotFlag)
+			core.LogInfo(vm.Name, "compacted %s:%d", diskControllerFlag, diskSlotFlag)
 		}
 	},
 }
@@ -2524,7 +2519,7 @@ var isosCmd = &cobra.Command{
 	Short: "List available ISO images",
 	Run: func(cmd *cobra.Command, args []string) {
 		requireSettings()
-		isos, err := internal.ListISOs(settings.IsoDirectory)
+		isos, err := core.ListISOs(settings.IsoDirectory)
 		exitOnErr(err)
 		if len(isos) == 0 {
 			fmt.Println("No ISO files found")
@@ -2555,22 +2550,22 @@ var configCdromMountCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		isoPath := filepath.Join(settings.IsoDirectory, isoFlag)
 		if _, err := os.Stat(isoPath); os.IsNotExist(err) {
-			internal.LogError(internal.ErrInvalidPath, "", "ISO '%s' not found in %s", isoFlag, settings.IsoDirectory)
+			core.LogError(core.ErrInvalidPath, "", "ISO '%s' not found in %s", isoFlag, settings.IsoDirectory)
 			return
 		}
 
 		for _, vm := range targets {
-			err := internal.MountISO(vm.Path, cdromControllerFlag, cdromSlotFlag, isoPath)
+			err := core.MountISO(vm.Path, cdromControllerFlag, cdromSlotFlag, isoPath)
 			if err != nil {
-				internal.LogError(internal.ErrCDVDConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrCDVDConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "mounted %s on %s:%d", isoFlag, cdromControllerFlag, cdromSlotFlag)
+			core.LogInfo(vm.Name, "mounted %s on %s:%d", isoFlag, cdromControllerFlag, cdromSlotFlag)
 		}
 	},
 }
@@ -2584,16 +2579,16 @@ var configCdromUnmountCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		for _, vm := range targets {
-			err := internal.UnmountISO(vm.Path, cdromControllerFlag, cdromSlotFlag)
+			err := core.UnmountISO(vm.Path, cdromControllerFlag, cdromSlotFlag)
 			if err != nil {
-				internal.LogError(internal.ErrCDVDConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrCDVDConfig, vm.Name, "%s", err)
 				continue
 			}
-			internal.LogInfo(vm.Name, "unmounted %s:%d", cdromControllerFlag, cdromSlotFlag)
+			core.LogInfo(vm.Name, "unmounted %s:%d", cdromControllerFlag, cdromSlotFlag)
 		}
 	},
 }
@@ -2611,22 +2606,22 @@ var configCdromBootCmd = &cobra.Command{
 			return
 		}
 		requireSettings()
-		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 
 		connect := bootConnectFlag
 
 		for _, vm := range targets {
-			err := internal.SetCDROMBoot(vm.Path, cdromControllerFlag, cdromSlotFlag, connect)
+			err := core.SetCDROMBoot(vm.Path, cdromControllerFlag, cdromSlotFlag, connect)
 			if err != nil {
-				internal.LogError(internal.ErrCDVDConfig, vm.Name, "%s", err)
+				core.LogError(core.ErrCDVDConfig, vm.Name, "%s", err)
 				continue
 			}
 			state := "on"
 			if !connect {
 				state = "off"
 			}
-			internal.LogInfo(vm.Name, "%s:%d connect at boot: %s", cdromControllerFlag, cdromSlotFlag, state)
+			core.LogInfo(vm.Name, "%s:%d connect at boot: %s", cdromControllerFlag, cdromSlotFlag, state)
 		}
 	},
 }
@@ -2639,9 +2634,9 @@ var hwinfoCmd = &cobra.Command{
 	Use:   "hwinfo",
 	Short: "Show detected host hardware resources",
 	Run: func(cmd *cobra.Command, args []string) {
-		host, err := internal.DetectHostResources()
+		host, err := core.DetectHostResources()
 		if err != nil {
-			internal.LogError(internal.ErrConfig, "", "%s", err)
+			core.LogError(core.ErrConfig, "", "%s", err)
 			return
 		}
 		fmt.Printf("CPU: %d cores, %d logical processors\n", host.CPUCores, host.CPUThreads)
@@ -2672,8 +2667,8 @@ var errorsCmd = &cobra.Command{
 			{"VM6", "Environment/Settings"},
 			{"VM7", "File/VMX Operations"},
 		}
-		byPrefix := map[string][]internal.ErrorRef{}
-		for _, e := range internal.ErrorCodes {
+		byPrefix := map[string][]core.ErrorRef{}
+		for _, e := range core.ErrorCodes {
 			p := e.Code[:3]
 			byPrefix[p] = append(byPrefix[p], e)
 		}
@@ -2877,6 +2872,9 @@ func init() {
 
 	// VM encryption password (global)
 	rootCmd.PersistentFlags().StringVar(&vpFlag, "vp", "", "VM encryption password (overrides VM_ENCRYPTION_PASS from .env)")
+
+	// Hypervisor backend override (global)
+	rootCmd.PersistentFlags().StringVar(&hvFlag, "hv", "", "Hypervisor backend: workstation, vbox, hyperv, proxmox (overrides .env and auto-detection)")
 
 	// Bootstrap — persistent flags shared by all subcommands
 	bootstrapCmd.PersistentFlags().StringVarP(&bootstrapUserFlag, "user", "u", "", "Guest OS username with admin/root privileges")

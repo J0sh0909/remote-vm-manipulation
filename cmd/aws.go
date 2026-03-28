@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/J0sh0909/rift/internal"
+	"github.com/J0sh0909/rift/internal/aws"
+	"github.com/J0sh0909/rift/internal/core"
 	"github.com/spf13/cobra"
 )
 
@@ -38,8 +39,8 @@ var (
 // ---------------------------------------------------------------------------
 
 var (
-	awsBackend  *internal.AWSBackend
-	awsSettings internal.Settings
+	awsBackend  *aws.AWSBackend
+	awsSettings core.Settings
 )
 
 func requireAWS() {
@@ -47,15 +48,15 @@ func requireAWS() {
 		return
 	}
 	// Load settings for AWS_REGION/AWS_KEY_DIR (best-effort; .env is optional for AWS).
-	awsSettings, _ = internal.LoadSettings()
+	awsSettings, _ = core.LoadSettings()
 	region := awsRegionFlag
 	if region == "" {
 		region = awsSettings.AWSRegion
 	}
 	var err error
-	awsBackend, err = internal.NewAWSBackend(region)
+	awsBackend, err = aws.NewAWSBackend(region)
 	if err != nil {
-		internal.LogError(internal.ErrAWS, "", "initializing AWS: %s", err)
+		core.LogError(core.ErrAWS, "", "initializing AWS: %s", err)
 		os.Exit(1)
 	}
 }
@@ -180,7 +181,7 @@ var awsListCmd = &cobra.Command{
 		requireAWS()
 		instances, err := awsBackend.ListInstances(awsAllFlag)
 		if err != nil {
-			internal.LogError(internal.ErrAWS, "", "listing instances: %s", err)
+			core.LogError(core.ErrAWS, "", "listing instances: %s", err)
 			os.Exit(1)
 		}
 		if len(instances) == 0 {
@@ -220,7 +221,7 @@ var awsStartCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		requireAWS()
 		if err := awsBackend.StartInstances(args); err != nil {
-			internal.LogError(internal.ErrAWSStartFailed, "", "%s", err)
+			core.LogError(core.ErrAWSStartFailed, "", "%s", err)
 			os.Exit(1)
 		}
 		for _, id := range args {
@@ -228,12 +229,12 @@ var awsStartCmd = &cobra.Command{
 		}
 		for _, id := range args {
 			if err := awsBackend.WaitUntilRunning(id, 5*time.Minute); err != nil {
-				internal.LogError(internal.ErrAWSStartFailed, id, "waiting for running: %s", err)
+				core.LogError(core.ErrAWSStartFailed, id, "waiting for running: %s", err)
 				continue
 			}
 			inst, err := awsBackend.GetInstance(id)
 			if err != nil {
-				internal.LogError(internal.ErrAWSNotFound, id, "%s", err)
+				core.LogError(core.ErrAWSNotFound, id, "%s", err)
 				continue
 			}
 			pub := inst.PublicIP
@@ -256,7 +257,7 @@ var awsStopCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		requireAWS()
 		if err := awsBackend.StopInstances(args, awsHardFlag); err != nil {
-			internal.LogError(internal.ErrAWSStopFailed, "", "%s", err)
+			core.LogError(core.ErrAWSStopFailed, "", "%s", err)
 			os.Exit(1)
 		}
 		for _, id := range args {
@@ -264,7 +265,7 @@ var awsStopCmd = &cobra.Command{
 		}
 		for _, id := range args {
 			if err := awsBackend.WaitUntilStopped(id, 5*time.Minute); err != nil {
-				internal.LogError(internal.ErrAWSStopFailed, id, "waiting for stopped: %s", err)
+				core.LogError(core.ErrAWSStopFailed, id, "waiting for stopped: %s", err)
 				continue
 			}
 			fmt.Printf("%s → stopped\n", id)
@@ -307,11 +308,11 @@ var awsCreateCmd = &cobra.Command{
 			} else {
 				pemData, err := awsBackend.CreateKeyPair(keyName)
 				if err != nil {
-					internal.LogError(internal.ErrAWSCreateFailed, "", "creating key pair: %s", err)
+					core.LogError(core.ErrAWSCreateFailed, "", "creating key pair: %s", err)
 					os.Exit(1)
 				}
 				if err := os.WriteFile(pemPath, []byte(pemData), 0600); err != nil {
-					internal.LogError(internal.ErrAWSCreateFailed, "", "writing key file: %s", err)
+					core.LogError(core.ErrAWSCreateFailed, "", "writing key file: %s", err)
 					os.Exit(1)
 				}
 				fmt.Printf("key pair → %s\n", pemPath)
@@ -321,19 +322,19 @@ var awsCreateCmd = &cobra.Command{
 		// 2. Get default VPC + subnet.
 		vpcID, err := awsBackend.GetDefaultVPC()
 		if err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, "", "finding default VPC: %s", err)
+			core.LogError(core.ErrAWSCreateFailed, "", "finding default VPC: %s", err)
 			os.Exit(1)
 		}
 		subnetID, err := awsBackend.GetFirstSubnet(vpcID)
 		if err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, "", "finding subnet: %s", err)
+			core.LogError(core.ErrAWSCreateFailed, "", "finding subnet: %s", err)
 			os.Exit(1)
 		}
 
 		// 3. Security group.
 		sgID, err := awsBackend.EnsureSecurityGroup(vpcID)
 		if err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, "", "security group: %s", err)
+			core.LogError(core.ErrAWSCreateFailed, "", "security group: %s", err)
 			os.Exit(1)
 		}
 
@@ -347,13 +348,13 @@ var awsCreateCmd = &cobra.Command{
 		fmt.Printf("launching %s (%s)...\n", awsNameFlag, instType)
 		instanceID, err := awsBackend.CreateInstance(awsAMIFlag, awsNameFlag, instType, keyName, sgID, subnetID)
 		if err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, "", "%s", err)
+			core.LogError(core.ErrAWSCreateFailed, "", "%s", err)
 			os.Exit(1)
 		}
 
 		// 5. Wait for running.
 		if err := awsBackend.WaitUntilRunning(instanceID, 5*time.Minute); err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, instanceID, "waiting for running: %s", err)
+			core.LogError(core.ErrAWSCreateFailed, instanceID, "waiting for running: %s", err)
 			os.Exit(1)
 		}
 
@@ -361,7 +362,7 @@ var awsCreateCmd = &cobra.Command{
 		var eipAllocID string
 		publicIP, allocID, eipErr := awsBackend.AllocateAndAssociateEIP(instanceID)
 		if eipErr != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, instanceID, "elastic IP: %s", eipErr)
+			core.LogError(core.ErrAWSCreateFailed, instanceID, "elastic IP: %s", eipErr)
 		} else {
 			eipAllocID = allocID
 		}
@@ -388,7 +389,7 @@ var awsCreateCmd = &cobra.Command{
 		fmt.Printf("instance:  %s\n", instanceID)
 		fmt.Printf("public IP: %s\n", publicIP)
 		fmt.Printf("key file:  %s\n", pemPath)
-		user := internal.GuessSSHUser(inst.Platform)
+		user := aws.GuessSSHUser(inst.Platform)
 		if publicIP != "" {
 			fmt.Printf("ssh:       ssh -i %s %s@%s\n", pemPath, user, publicIP)
 		}
@@ -539,7 +540,7 @@ func awsTerminateOne(id string) {
 
 	// Terminate.
 	if err := awsBackend.TerminateInstances([]string{id}); err != nil {
-		internal.LogError(internal.ErrAWSTermFailed, id, "%s", err)
+		core.LogError(core.ErrAWSTermFailed, id, "%s", err)
 		return
 	}
 	fmt.Printf("%s → terminated\n", id)
@@ -630,7 +631,7 @@ var awsSSHCmd = &cobra.Command{
 		requireAWS()
 		inst, err := awsBackend.GetInstance(args[0])
 		if err != nil {
-			internal.LogError(internal.ErrAWSNotFound, args[0], "%s", err)
+			core.LogError(core.ErrAWSNotFound, args[0], "%s", err)
 			os.Exit(1)
 		}
 		if inst.PublicIP == "" {
@@ -639,7 +640,7 @@ var awsSSHCmd = &cobra.Command{
 		}
 		user := awsUserFlag
 		if user == "" {
-			user = internal.GuessSSHUser(inst.Platform)
+			user = aws.GuessSSHUser(inst.Platform)
 		}
 		pemPath := awsKeyPath(inst.KeyName)
 		// If that doesn't exist, try without the rift- prefix.
@@ -672,7 +673,7 @@ var awsIPCmd = &cobra.Command{
 		requireAWS()
 		inst, err := awsBackend.GetInstance(args[0])
 		if err != nil {
-			internal.LogError(internal.ErrAWSNotFound, args[0], "%s", err)
+			core.LogError(core.ErrAWSNotFound, args[0], "%s", err)
 			os.Exit(1)
 		}
 		pub := inst.PublicIP

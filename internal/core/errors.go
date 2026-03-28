@@ -1,4 +1,4 @@
-package internal
+package core
 
 import (
 	"fmt"
@@ -33,12 +33,12 @@ const (
 	ErrTPMConfig     = "VM208"
 
 	// VM3xx — exec/guest operations
-	ErrExec            = "VM300"
-	ErrGuestOSNotDet   = "VM301"
-	ErrGuestCmd        = "VM302"
-	ErrOutputCapture   = "VM303"
-	ErrInterpreter     = "VM304"
-	ErrNotRunning      = "VM305"
+	ErrExec             = "VM300"
+	ErrGuestOSNotDet    = "VM301"
+	ErrGuestCmd         = "VM302"
+	ErrOutputCapture    = "VM303"
+	ErrInterpreter      = "VM304"
+	ErrNotRunning       = "VM305"
 	ErrBootstrapLinux   = "VM306"
 	ErrBootstrapWindows = "VM307"
 
@@ -79,10 +79,10 @@ const (
 	ErrAWSTermFailed   = "VM805"
 
 	// VM9xx — migration operations
-	ErrMigration     = "VM900"
-	ErrDiskConvertMig = "VM901"
-	ErrSourceNotFound = "VM902"
-	ErrQemuImgNotFound = "VM903"
+	ErrMigration        = "VM900"
+	ErrDiskConvertMig   = "VM901"
+	ErrSourceNotFound   = "VM902"
+	ErrQemuImgNotFound  = "VM903"
 	ErrTargetHypervisor = "VM904"
 )
 
@@ -215,7 +215,7 @@ func LogInfo(vm string, msg string, args ...any) {
 	}
 	var line string
 	if vm != "" {
-		line = fmt.Sprintf("%s \u2192 %s", vm, msg)
+		line = fmt.Sprintf("%s → %s", vm, msg)
 	} else {
 		line = msg
 	}

@@ -1,4 +1,4 @@
-package internal
+package vmware
 
 import (
 	"bufio"
@@ -12,19 +12,26 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/J0sh0909/rift/internal/core"
 	"github.com/vbauerster/mpb/v8"
 )
 
+func init() {
+	core.RegisterBackend("workstation", func(s core.Settings) (core.Hypervisor, error) {
+		return &WorkstationBackend{s: s}, nil
+	})
+}
+
 // WorkstationBackend implements Hypervisor using VMware Workstation (vmrun).
 type WorkstationBackend struct {
-	s Settings
+	s core.Settings
 
 	// encryptionCache caches per-VMX encryption status so vpArgsForVM
 	// doesn't re-parse the VMX file on every vmrun call. Keys are vmxPath,
 	// values are bool (true = encrypted).
 	encryptionCache sync.Map
 
-	// hostnameCache maps vmxPath → cached Windows computer name.
+	// hostnameCache maps vmxPath -> cached Windows computer name.
 	// Populated lazily on first auth retry for each VM.
 	hostnameMu    sync.Mutex
 	hostnameCache map[string]string
@@ -36,7 +43,7 @@ type WorkstationBackend struct {
 
 // isEncryptedVM checks the VMX file for encryption markers (vtpm or encryption keys).
 func isEncryptedVM(vmxPath string) bool {
-	data, err := ParseVMXKeys(vmxPath)
+	data, err := core.ParseVMXKeys(vmxPath)
 	if err != nil {
 		return false
 	}
@@ -86,7 +93,7 @@ func wsVmrun(vmrunPath string, args ...string) (string, error) {
 // VM Discovery & Power State
 // ---------------------------------------------------------------------------
 
-func wsParseInventory(inventoryPath string) ([]VM, error) {
+func wsParseInventory(inventoryPath string) ([]core.VM, error) {
 	content, err := os.ReadFile(inventoryPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading inventory file: %w", err)
@@ -127,7 +134,7 @@ func wsParseInventory(inventoryPath string) ([]VM, error) {
 		}
 	}
 
-	var vms []VM
+	var vms []core.VM
 	for _, entry := range entries {
 		config := entry["config"]
 		if !strings.HasSuffix(config, ".vmx") {
@@ -137,7 +144,7 @@ func wsParseInventory(inventoryPath string) ([]VM, error) {
 		if folderName == "" {
 			folderName = "Ungrouped"
 		}
-		vms = append(vms, VM{
+		vms = append(vms, core.VM{
 			Name:   entry["DisplayName"],
 			Path:   config,
 			Folder: folderName,
@@ -162,7 +169,7 @@ func wsListRunning(vmrunPath string, args ...string) ([]string, error) {
 	return lines[1:], nil
 }
 
-func (w *WorkstationBackend) GetPowerState() ([]VM, error) {
+func (w *WorkstationBackend) GetPowerState() ([]core.VM, error) {
 	vms, err := wsParseInventory(w.s.VmInventory)
 	if err != nil {
 		return nil, fmt.Errorf("parsing inventory: %w", err)
@@ -479,15 +486,6 @@ func (w *WorkstationBackend) ListSnapshots(vmxPath string) ([]string, error) {
 // Archive & OVF Tool Operations
 // ---------------------------------------------------------------------------
 
-// RenderProgressBar prints a 50-char wide progress bar to stdout using \r so
-// it overwrites the current line. Call fmt.Println() after the final update.
-func RenderProgressBar(percent int) {
-	const width = 50
-	filled := percent * width / 100
-	bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
-	fmt.Printf("\r[%s] %3d%%", bar, percent)
-}
-
 // splitOnCR is a bufio.SplitFunc that splits on \r, \n, or \r\n.
 // ovftool separates progress updates with bare \r, not \n.
 func splitOnCR(data []byte, atEOF bool) (advance int, token []byte, err error) {
@@ -575,7 +573,7 @@ func wsRunOvftool(ovftoolPath string, args ...string) error {
 	barActive := false
 	for line := range lines {
 		if pct, ok := parseOvftoolProgress(line); ok {
-			RenderProgressBar(pct)
+			core.RenderProgressBar(pct)
 			barActive = true
 		} else {
 			if barActive {

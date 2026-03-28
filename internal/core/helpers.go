@@ -1,4 +1,4 @@
-package internal
+package core
 
 import (
 	"fmt"
@@ -1325,4 +1325,13 @@ func ParseVMXDisplay(vmxPath string) (DisplaySettings, error) {
 		Accelerated3D:    accel,
 		GraphicsMemoryMB: gfxMB,
 	}, nil
+}
+
+// RenderProgressBar prints a 50-char wide progress bar to stdout using \r so
+// it overwrites the current line. Call fmt.Println() after the final update.
+func RenderProgressBar(percent int) {
+	const width = 50
+	filled := percent * width / 100
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
+	fmt.Printf("\r[%s] %3d%%", bar, percent)
 }

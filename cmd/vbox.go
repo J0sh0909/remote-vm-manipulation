@@ -5,7 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/J0sh0909/rift/internal"
+	"github.com/J0sh0909/rift/internal/core"
+	"github.com/J0sh0909/rift/internal/vbox"
 	"github.com/spf13/cobra"
 )
 
@@ -22,16 +23,16 @@ var (
 // Lazy VBox backend
 // ---------------------------------------------------------------------------
 
-var vboxBackend *internal.VBoxBackend
+var vboxBackend *vbox.VBoxBackend
 
 func requireVBox() {
 	if vboxBackend != nil {
 		return
 	}
 	var err error
-	vboxBackend, err = internal.NewVBoxBackend()
+	vboxBackend, err = vbox.NewVBoxBackend()
 	if err != nil {
-		internal.LogError(internal.ErrConfig, "", "%s", err)
+		core.LogError(core.ErrConfig, "", "%s", err)
 		os.Exit(1)
 	}
 }
@@ -57,7 +58,7 @@ var vboxListCmd = &cobra.Command{
 		requireVBox()
 		vms, err := vboxBackend.ListVMs()
 		if err != nil {
-			internal.LogError(internal.ErrConfig, "", "%s", err)
+			core.LogError(core.ErrConfig, "", "%s", err)
 			os.Exit(1)
 		}
 		if len(vms) == 0 {
@@ -82,8 +83,8 @@ var vboxStartCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		requireVBox()
-		if err := vboxBackend.StartVM(args[0]); err != nil {
-			internal.LogError(internal.ErrStartFailed, args[0], "%s", err)
+		if err := vboxBackend.DirectStartVM(args[0]); err != nil {
+			core.LogError(core.ErrStartFailed, args[0], "%s", err)
 			os.Exit(1)
 		}
 		fmt.Printf("%s → started\n", args[0])
@@ -100,8 +101,8 @@ var vboxStopCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		requireVBox()
-		if err := vboxBackend.StopVM(args[0], vboxHardFlag); err != nil {
-			internal.LogError(internal.ErrStopFailed, args[0], "%s", err)
+		if err := vboxBackend.DirectStopVM(args[0], vboxHardFlag); err != nil {
+			core.LogError(core.ErrStopFailed, args[0], "%s", err)
 			os.Exit(1)
 		}
 		fmt.Printf("%s → stopped\n", args[0])
@@ -120,7 +121,7 @@ var vboxInfoCmd = &cobra.Command{
 		requireVBox()
 		info, err := vboxBackend.GetVMInfo(args[0])
 		if err != nil {
-			internal.LogError(internal.ErrConfig, args[0], "%s", err)
+			core.LogError(core.ErrConfig, args[0], "%s", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Name:     %s\n", info.Name)
@@ -160,7 +161,7 @@ var vboxSnapCreateCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		requireVBox()
 		if err := vboxBackend.SnapshotCreate(args[0], args[1]); err != nil {
-			internal.LogError(internal.ErrSnapCreate, args[0], "%s", err)
+			core.LogError(core.ErrSnapCreate, args[0], "%s", err)
 			os.Exit(1)
 		}
 		fmt.Printf("%s → snapshot '%s' created\n", args[0], args[1])
@@ -175,7 +176,7 @@ var vboxSnapListCmd = &cobra.Command{
 		requireVBox()
 		snaps, err := vboxBackend.SnapshotList(args[0])
 		if err != nil {
-			internal.LogError(internal.ErrSnapshot, args[0], "%s", err)
+			core.LogError(core.ErrSnapshot, args[0], "%s", err)
 			os.Exit(1)
 		}
 		if len(snaps) == 0 {
@@ -195,7 +196,7 @@ var vboxSnapRevertCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		requireVBox()
 		if err := vboxBackend.SnapshotRevert(args[0], args[1]); err != nil {
-			internal.LogError(internal.ErrSnapRevert, args[0], "%s", err)
+			core.LogError(core.ErrSnapRevert, args[0], "%s", err)
 			os.Exit(1)
 		}
 		fmt.Printf("%s → reverted to '%s'\n", args[0], args[1])
@@ -209,7 +210,7 @@ var vboxSnapDeleteCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		requireVBox()
 		if err := vboxBackend.SnapshotDelete(args[0], args[1]); err != nil {
-			internal.LogError(internal.ErrSnapDelete, args[0], "%s", err)
+			core.LogError(core.ErrSnapDelete, args[0], "%s", err)
 			os.Exit(1)
 		}
 		fmt.Printf("%s → snapshot '%s' deleted\n", args[0], args[1])
@@ -231,7 +232,7 @@ var vboxDeleteCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if err := vboxBackend.DeleteVM(args[0]); err != nil {
-			internal.LogError(internal.ErrConfig, args[0], "%s", err)
+			core.LogError(core.ErrConfig, args[0], "%s", err)
 			os.Exit(1)
 		}
 		fmt.Printf("%s → deleted\n", args[0])

@@ -1,11 +1,28 @@
-package internal
+package vbox
 
 import (
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/J0sh0909/rift/internal/core"
+	"github.com/vbauerster/mpb/v8"
 )
+
+func init() {
+	core.RegisterBackend("vbox", func(s core.Settings) (core.Hypervisor, error) {
+		path := s.VBoxManagePath
+		if path == "" {
+			p, err := exec.LookPath("VBoxManage")
+			if err != nil {
+				return nil, fmt.Errorf("VBoxManage not found in PATH")
+			}
+			path = p
+		}
+		return &VBoxBackend{vboxManage: path}, nil
+	})
+}
 
 // VBoxBackend wraps VBoxManage CLI commands for VirtualBox VM management.
 type VBoxBackend struct {
@@ -29,6 +46,12 @@ type VBoxNIC struct {
 	Index   int
 	Type    string // connection type: nat, bridged, hostonly, intnet, none
 	NICType string // hardware type: virtio, 82540EM, 82545EM, Am79C970A, Am79C973
+}
+
+// VBoxVM holds minimal info about a VirtualBox VM.
+type VBoxVM struct {
+	Name  string
+	State string
 }
 
 // NewVBoxBackend creates a VBoxBackend, locating VBoxManage in PATH.
@@ -83,14 +106,14 @@ func (v *VBoxBackend) ListVMs() ([]VBoxVM, error) {
 	return vms, nil
 }
 
-// StartVM starts a VM in headless mode.
-func (v *VBoxBackend) StartVM(nameOrUUID string) error {
+// DirectStartVM starts a VM in headless mode.
+func (v *VBoxBackend) DirectStartVM(nameOrUUID string) error {
 	_, err := v.run("startvm", nameOrUUID, "--type", "headless")
 	return err
 }
 
-// StopVM stops a VM. If hard is true, uses poweroff; otherwise acpipowerbutton.
-func (v *VBoxBackend) StopVM(nameOrUUID string, hard bool) error {
+// DirectStopVM stops a VM. If hard is true, uses poweroff; otherwise acpipowerbutton.
+func (v *VBoxBackend) DirectStopVM(nameOrUUID string, hard bool) error {
 	action := "acpipowerbutton"
 	if hard {
 		action = "poweroff"
@@ -248,3 +271,112 @@ func parseMachineReadable(output string) map[string]string {
 	}
 	return data
 }
+
+// ---------------------------------------------------------------------------
+// core.Hypervisor interface implementation
+// ---------------------------------------------------------------------------
+
+func (v *VBoxBackend) GetPowerState() ([]core.VM, error) {
+	vms, err := v.ListVMs()
+	if err != nil {
+		return nil, err
+	}
+	var result []core.VM
+	for _, vm := range vms {
+		result = append(result, core.VM{
+			Name:    vm.Name,
+			Path:    vm.Name, // VBox uses names as identifiers
+			Running: vm.State == "running",
+		})
+	}
+	return result, nil
+}
+
+func (v *VBoxBackend) EnsureVMwareRunning() error { return nil }
+
+// StartVM implements core.Hypervisor — delegates to headless start.
+func (v *VBoxBackend) StartVM(vmxPath string) error {
+	_, err := v.run("startvm", vmxPath, "--type", "headless")
+	return err
+}
+
+// StopVM implements core.Hypervisor.
+func (v *VBoxBackend) StopVM(vmxPath string, mode ...string) error {
+	action := "acpipowerbutton"
+	if len(mode) > 0 && mode[0] == "hard" {
+		action = "poweroff"
+	}
+	_, err := v.run("controlvm", vmxPath, action)
+	return err
+}
+
+func (v *VBoxBackend) SuspendVM(vmxPath string) error {
+	_, err := v.run("controlvm", vmxPath, "savestate")
+	return err
+}
+
+func (v *VBoxBackend) ResetVM(vmxPath string) error {
+	_, err := v.run("controlvm", vmxPath, "reset")
+	return err
+}
+
+func (v *VBoxBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script, adminUser, adminPass string) (string, error) {
+	return "", fmt.Errorf("not supported on VirtualBox — use SSH")
+}
+
+func (v *VBoxBackend) RunGuestProgram(vmxPath, user, pass, adminUser, adminPass, program string, args ...string) (string, error) {
+	return "", fmt.Errorf("not supported on VirtualBox — use SSH")
+}
+
+func (v *VBoxBackend) CopyFileFromGuest(vmxPath, user, pass, adminUser, adminPass, guestPath, hostPath string) error {
+	return fmt.Errorf("not supported on VirtualBox — use SSH")
+}
+
+func (v *VBoxBackend) DeleteFileInGuest(vmxPath, user, pass, adminUser, adminPass, guestPath string) error {
+	return fmt.Errorf("not supported on VirtualBox — use SSH")
+}
+
+func (v *VBoxBackend) ListGuestProcesses(vmxPath, user, pass, adminUser, adminPass string) error {
+	return fmt.Errorf("not supported on VirtualBox — use SSH")
+}
+
+func (v *VBoxBackend) CreateSnapshot(vmxPath, name string) error {
+	_, err := v.run("snapshot", vmxPath, "take", name)
+	return err
+}
+
+func (v *VBoxBackend) RevertToSnapshot(vmxPath, name string) error {
+	_, err := v.run("snapshot", vmxPath, "restore", name)
+	return err
+}
+
+func (v *VBoxBackend) DeleteSnapshot(vmxPath, name string) error {
+	_, err := v.run("snapshot", vmxPath, "delete", name)
+	return err
+}
+
+func (v *VBoxBackend) ListSnapshots(vmxPath string) ([]string, error) {
+	return v.SnapshotList(vmxPath)
+}
+
+func (v *VBoxBackend) FindOvftool() (string, error) {
+	return "", fmt.Errorf("ovftool not applicable for VirtualBox — use VBoxManage export/import")
+}
+
+func (v *VBoxBackend) ExportVM(vmxPath, destPath string) error {
+	return v.ExportOVF(vmxPath, destPath)
+}
+
+func (v *VBoxBackend) ExportVMWithBar(vmxPath, destPath string, bar *mpb.Bar) error {
+	err := v.ExportOVF(vmxPath, destPath)
+	if err == nil {
+		bar.SetCurrent(100)
+	}
+	return err
+}
+
+func (v *VBoxBackend) ImportVM(srcPath, destVmxPath string) error {
+	return v.ImportOVF(srcPath)
+}
+
+func (v *VBoxBackend) WarmEncryptionCache(_ []string) {}

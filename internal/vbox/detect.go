@@ -1,16 +1,10 @@
-package internal
+package vbox
 
 import (
 	"os/exec"
 	"regexp"
 	"strings"
 )
-
-// VBoxVM holds minimal info about a VirtualBox VM.
-type VBoxVM struct {
-	Name  string
-	State string
-}
 
 // DetectVBoxVMs returns VirtualBox VMs if VBoxManage is available.
 // Returns nil, nil if VBoxManage is not found (not an error).

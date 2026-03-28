@@ -1,4 +1,4 @@
-package internal
+package core
 
 import (
 	"fmt"
@@ -26,6 +26,22 @@ type Settings struct {
 	AWSKeyDir      string
 	RiftStatePath  string
 	QemuImgPath    string
+
+	// VirtualBox
+	VBoxManagePath string
+
+	// Hyper-V
+	HyperVEnabled bool
+
+	// Proxmox
+	ProxmoxHost        string
+	ProxmoxUser        string
+	ProxmoxTokenID     string
+	ProxmoxTokenSecret string
+
+	// DetectedHypervisors is populated by NewHypervisor auto-detection.
+	// Each entry is a backend name: "workstation", "vbox", "hyperv".
+	DetectedHypervisors []string
 }
 
 // HostResources holds detected host hardware limits
@@ -46,15 +62,15 @@ func LoadSettings() (Settings, error) {
 	}
 
 	s := Settings{
-		VmrunPath:    os.Getenv("VMRUN_PATH"),
-		VmDirectory:  os.Getenv("VM_DIRECTORY"),
-		VmInventory:  os.Getenv("INVENTORY_PATH"),
-		NetmapPath:   os.Getenv("NETMAP_PATH"),
-		IsoDirectory: os.Getenv("ISO_DIRECTORY"),
-		VdiskPath:    os.Getenv("VDISK_PATH"),
-		ArchivePath:  os.Getenv("ARCHIVE_PATH"),
-		LogPath:      os.Getenv("LOG_PATH"),
-		Hypervisor:   os.Getenv("HYPERVISOR"),
+		VmrunPath:      os.Getenv("VMRUN_PATH"),
+		VmDirectory:    os.Getenv("VM_DIRECTORY"),
+		VmInventory:    os.Getenv("INVENTORY_PATH"),
+		NetmapPath:     os.Getenv("NETMAP_PATH"),
+		IsoDirectory:   os.Getenv("ISO_DIRECTORY"),
+		VdiskPath:      os.Getenv("VDISK_PATH"),
+		ArchivePath:    os.Getenv("ARCHIVE_PATH"),
+		LogPath:        os.Getenv("LOG_PATH"),
+		Hypervisor:     os.Getenv("HYPERVISOR"),
 		DefaultUser:    os.Getenv("VM_DEFAULT_USER"),
 		DefaultPass:    os.Getenv("VM_DEFAULT_PASS"),
 		EncryptionPass: os.Getenv("VM_ENCRYPTION_PASS"),
@@ -62,10 +78,31 @@ func LoadSettings() (Settings, error) {
 		AWSKeyDir:      os.Getenv("AWS_KEY_DIR"),
 		RiftStatePath:  os.Getenv("RIFT_STATE_PATH"),
 		QemuImgPath:    os.Getenv("QEMU_IMG_PATH"),
+
+		// VirtualBox
+		VBoxManagePath: os.Getenv("VBOX_MANAGE_PATH"),
+
+		// Hyper-V
+		HyperVEnabled: strings.EqualFold(os.Getenv("HYPERV_ENABLED"), "true"),
+
+		// Proxmox
+		ProxmoxHost:        os.Getenv("PROXMOX_HOST"),
+		ProxmoxUser:        os.Getenv("PROXMOX_USER"),
+		ProxmoxTokenID:     os.Getenv("PROXMOX_TOKEN_ID"),
+		ProxmoxTokenSecret: os.Getenv("PROXMOX_TOKEN_SECRET"),
 	}
 
-	if s.VmrunPath == "" || s.VmDirectory == "" || s.VmInventory == "" || s.NetmapPath == "" || s.IsoDirectory == "" || s.VdiskPath == "" {
-		return Settings{}, fmt.Errorf("all environment variables must be set in .env (VMRUN_PATH, VM_DIRECTORY, INVENTORY_PATH, NETMAP_PATH, ISO_DIRECTORY, VDISK_PATH)")
+	// Multi-hypervisor: don't error on empty hypervisor-specific fields.
+	// Only error if absolutely nothing is configured.
+	hasVMware := s.VmrunPath != ""
+	hasVBox := s.VBoxManagePath != ""
+	hasHyperV := s.HyperVEnabled
+	hasProxmox := s.ProxmoxHost != ""
+	hasAWS := s.AWSRegion != "" || s.AWSKeyDir != ""
+	hasExplicit := s.Hypervisor != ""
+
+	if !hasVMware && !hasVBox && !hasHyperV && !hasProxmox && !hasAWS && !hasExplicit {
+		return Settings{}, fmt.Errorf("no hypervisor configured in .env — set at least one of: VMRUN_PATH, VBOX_MANAGE_PATH, HYPERV_ENABLED, PROXMOX_HOST, or AWS_REGION")
 	}
 
 	// Best-effort: initialize file logging if LOG_PATH is set.

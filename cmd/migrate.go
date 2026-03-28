@@ -11,7 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/J0sh0909/rift/internal"
+	"github.com/J0sh0909/rift/internal/core"
+	"github.com/J0sh0909/rift/internal/vbox"
 	"github.com/spf13/cobra"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -32,7 +33,7 @@ var (
 // ---------------------------------------------------------------------------
 
 func findQemuImg() (string, error) {
-	s, _ := internal.LoadSettings()
+	s, _ := core.LoadSettings()
 	if s.QemuImgPath != "" {
 		if _, err := os.Stat(s.QemuImgPath); err == nil {
 			return s.QemuImgPath, nil
@@ -285,10 +286,10 @@ func migrateFolderVMwareToVBox() {
 	requireSettings()
 	vms, err := hv.GetPowerState()
 	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, "", "listing VMware VMs: %s", err)
+		core.LogError(core.ErrSourceNotFound, "", "listing VMware VMs: %s", err)
 		os.Exit(1)
 	}
-	var targets []internal.VM
+	var targets []core.VM
 	for _, vm := range vms {
 		if strings.EqualFold(vm.Folder, migrateFolderFlag) {
 			targets = append(targets, vm)
@@ -334,7 +335,7 @@ func migrateFolderVMwareToVBox() {
 	p.Wait()
 	for _, r := range results {
 		if r.err != nil {
-			internal.LogError(internal.ErrMigration, r.name, "%s", r.err)
+			core.LogError(core.ErrMigration, r.name, "%s", r.err)
 		} else {
 			fmt.Printf("%s → migrated to VirtualBox\n", r.name)
 		}
@@ -343,14 +344,14 @@ func migrateFolderVMwareToVBox() {
 
 func migrateFolderVBoxToVMware() {
 	requireSettings()
-	vbox, err := internal.NewVBoxBackend()
+	vbox, err := vbox.NewVBoxBackend()
 	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, "", "%s", err)
+		core.LogError(core.ErrSourceNotFound, "", "%s", err)
 		os.Exit(1)
 	}
 	vbVMs, err := vbox.ListVMs()
 	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, "", "listing VBox VMs: %s", err)
+		core.LogError(core.ErrSourceNotFound, "", "listing VBox VMs: %s", err)
 		os.Exit(1)
 	}
 	if len(vbVMs) == 0 {
@@ -393,7 +394,7 @@ func migrateFolderVBoxToVMware() {
 	p.Wait()
 	for _, r := range results {
 		if r.err != nil {
-			internal.LogError(internal.ErrMigration, r.name, "%s", r.err)
+			core.LogError(core.ErrMigration, r.name, "%s", r.err)
 		} else {
 			fmt.Printf("%s → migrated to VMware Workstation\n", r.name)
 		}
@@ -402,16 +403,16 @@ func migrateFolderVBoxToVMware() {
 
 // migrateOneVMwareToVBox migrates a single VMware VM to VBox. Returns nil on success.
 // The provided mpb bar is updated with disk conversion progress.
-func migrateOneVMwareToVBox(sourceVM internal.VM, bar *mpb.Bar) error {
+func migrateOneVMwareToVBox(sourceVM core.VM, bar *mpb.Bar) error {
 	if sourceVM.Running {
 		return fmt.Errorf("VM must be powered off before migration")
 	}
 
-	specs, err := internal.ParseVMXSpecs(sourceVM.Path)
+	specs, err := core.ParseVMXSpecs(sourceVM.Path)
 	if err != nil {
 		return fmt.Errorf("reading specs: %s", err)
 	}
-	vmxData, err := internal.ParseVMXKeys(sourceVM.Path)
+	vmxData, err := core.ParseVMXKeys(sourceVM.Path)
 	if err != nil {
 		return fmt.Errorf("reading VMX: %s", err)
 	}
@@ -425,7 +426,7 @@ func migrateOneVMwareToVBox(sourceVM internal.VM, bar *mpb.Bar) error {
 		ramMB = 512
 	}
 
-	disks, err := internal.ParseVMXDisks(sourceVM.Path)
+	disks, err := core.ParseVMXDisks(sourceVM.Path)
 	if err != nil || len(disks) == 0 {
 		return fmt.Errorf("no disks found")
 	}
@@ -444,7 +445,7 @@ func migrateOneVMwareToVBox(sourceVM internal.VM, bar *mpb.Bar) error {
 		return fmt.Errorf("disk conversion: %s", err)
 	}
 
-	vbox, err := internal.NewVBoxBackend()
+	vbox, err := vbox.NewVBoxBackend()
 	if err != nil {
 		return fmt.Errorf("VBoxManage: %s", err)
 	}
@@ -459,7 +460,7 @@ func migrateOneVMwareToVBox(sourceVM internal.VM, bar *mpb.Bar) error {
 		return fmt.Errorf("attaching disk: %s", err)
 	}
 
-	nics, _ := internal.ParseVMXNetworking(sourceVM.Path, nil)
+	nics, _ := core.ParseVMXNetworking(sourceVM.Path, nil)
 	for _, nic := range nics {
 		vboxConn := nicConnVMwareToVBox(nic.Type)
 		vboxDev := nicDevVMwareToVBox(nic.VirtualDev)
@@ -479,7 +480,7 @@ func migrateOneVMwareToVBox(sourceVM internal.VM, bar *mpb.Bar) error {
 // migrateOneVBoxToVMware migrates a single VBox VM to VMware. Returns nil on success.
 // The provided mpb bar is updated with disk conversion progress.
 func migrateOneVBoxToVMware(vmName string, bar *mpb.Bar) error {
-	vbox, err := internal.NewVBoxBackend()
+	vbox, err := vbox.NewVBoxBackend()
 	if err != nil {
 		return fmt.Errorf("%s", err)
 	}
@@ -546,10 +547,10 @@ func migrateVMwareToVBox(vmName string) {
 	// 1. Find the VMware VM.
 	vms, err := hv.GetPowerState()
 	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "%s", err)
+		core.LogError(core.ErrSourceNotFound, vmName, "%s", err)
 		os.Exit(1)
 	}
-	var sourceVM internal.VM
+	var sourceVM core.VM
 	found := false
 	for _, vm := range vms {
 		if strings.EqualFold(vm.Name, vmName) {
@@ -559,7 +560,7 @@ func migrateVMwareToVBox(vmName string) {
 		}
 	}
 	if !found {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "VM not found in VMware inventory")
+		core.LogError(core.ErrSourceNotFound, vmName, "VM not found in VMware inventory")
 		os.Exit(1)
 	}
 	if sourceVM.Running {
@@ -581,7 +582,7 @@ func migrateVMwareToVBox(vmName string) {
 
 	if err := migrateOneVMwareToVBox(sourceVM, bar); err != nil {
 		p.Wait()
-		internal.LogError(internal.ErrMigration, vmName, "%s", err)
+		core.LogError(core.ErrMigration, vmName, "%s", err)
 		os.Exit(1)
 	}
 	p.Wait()
@@ -597,14 +598,14 @@ func migrateVBoxToVMware(vmName string) {
 	requireSettings()
 
 	// 1. Get VBox VM info.
-	vbox, err := internal.NewVBoxBackend()
+	vbox, err := vbox.NewVBoxBackend()
 	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "%s", err)
+		core.LogError(core.ErrSourceNotFound, vmName, "%s", err)
 		os.Exit(1)
 	}
 	info, err := vbox.GetVMInfo(vmName)
 	if err != nil {
-		internal.LogError(internal.ErrSourceNotFound, vmName, "%s", err)
+		core.LogError(core.ErrSourceNotFound, vmName, "%s", err)
 		os.Exit(1)
 	}
 	if info.State == "running" {
@@ -626,7 +627,7 @@ func migrateVBoxToVMware(vmName string) {
 
 	if err := migrateOneVBoxToVMware(vmName, bar); err != nil {
 		p.Wait()
-		internal.LogError(internal.ErrMigration, vmName, "%s", err)
+		core.LogError(core.ErrMigration, vmName, "%s", err)
 		os.Exit(1)
 	}
 	p.Wait()
@@ -635,7 +636,7 @@ func migrateVBoxToVMware(vmName string) {
 }
 
 // generateVMX creates a minimal VMX file for a migrated VM.
-func generateVMX(name, guestOS string, cpus, ramMB int, vmdkFile string, nics []internal.VBoxNIC) string {
+func generateVMX(name, guestOS string, cpus, ramMB int, vmdkFile string, nics []vbox.VBoxNIC) string {
 	var b strings.Builder
 	b.WriteString(".encoding = \"UTF-8\"\n")
 	b.WriteString("config.version = \"8\"\n")
