@@ -1,19 +1,35 @@
 name: rift
 
 on:
+  push:
+    branches: [dev]
   workflow_dispatch:
     inputs:
       command:
-        description: 'rift command to run (e.g. list, start MyVM, exec --folder MyFolder "hostname" --user USER --pass PASSWORD)'
+        description: 'rift command (e.g. overview, list, start MyVM)'
         required: true
         type: string
 
 jobs:
-  run:
-    runs-on: self-hosted
+  build:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, strong]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build -o C:\actions-runner\rift.exe .
+
+  command:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, strong]
     env:
       ENV_PATH: C:/actions-runner/.env
       RUNNER_TRACKING_ID: ""
     steps:
-      - name: Run rift
-        run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
+      - run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
