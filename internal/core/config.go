@@ -102,7 +102,7 @@ func LoadSettings() (Settings, error) {
 	hasExplicit := s.Hypervisor != ""
 
 	if !hasVMware && !hasVBox && !hasHyperV && !hasProxmox && !hasAWS && !hasExplicit {
-		return Settings{}, fmt.Errorf("no hypervisor configured in .env — set at least one of: VMRUN_PATH, VBOX_MANAGE_PATH, HYPERV_ENABLED, PROXMOX_HOST, or AWS_REGION")
+		return Settings{}, fmt.Errorf("no hypervisor configured in .env - set at least one of: VMRUN_PATH, VBOX_MANAGE_PATH, HYPERV_ENABLED, PROXMOX_HOST, or AWS_REGION")
 	}
 
 	// Best-effort: initialize file logging if LOG_PATH is set.

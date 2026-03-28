@@ -83,7 +83,7 @@ var RequiresPowerOff = map[string]bool{
 }
 
 // ---------------------------------------------------------------------------
-// Target Resolution — eliminates repeated LoadSettings/GetPowerState/filter
+// Target Resolution - eliminates repeated LoadSettings/GetPowerState/filter
 // ---------------------------------------------------------------------------
 
 // ResolveTargets gets power state via hv and resolves VM targets
@@ -903,7 +903,7 @@ func RegenMAC(vmxPath string, index int) error {
 }
 
 // --------------------------------------------------------------------------
-// Disk Operations — unified pattern
+// Disk Operations - unified pattern
 // --------------------------------------------------------------------------
 
 func ParseVMXDisks(vmxPath string) ([]Disk, error) {

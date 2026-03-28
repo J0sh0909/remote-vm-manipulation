@@ -76,7 +76,7 @@ func (w *WorkstationBackend) vpArgsForVM(vmxPath string) []string {
 	if w.s.EncryptionPass != "" {
 		return []string{"-vp", w.s.EncryptionPass}
 	}
-	fmt.Fprintf(os.Stderr, "%s: VM is encrypted — use --vp or set VM_ENCRYPTION_PASS in .env\n", filepath.Base(filepath.Dir(vmxPath)))
+	fmt.Fprintf(os.Stderr, "%s: VM is encrypted - use --vp or set VM_ENCRYPTION_PASS in .env\n", filepath.Base(filepath.Dir(vmxPath)))
 	return nil
 }
 

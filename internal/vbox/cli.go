@@ -294,7 +294,7 @@ func (v *VBoxBackend) GetPowerState() ([]core.VM, error) {
 
 func (v *VBoxBackend) EnsureVMwareRunning() error { return nil }
 
-// StartVM implements core.Hypervisor — delegates to headless start.
+// StartVM implements core.Hypervisor - delegates to headless start.
 func (v *VBoxBackend) StartVM(vmxPath string) error {
 	_, err := v.run("startvm", vmxPath, "--type", "headless")
 	return err
@@ -321,23 +321,23 @@ func (v *VBoxBackend) ResetVM(vmxPath string) error {
 }
 
 func (v *VBoxBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script, adminUser, adminPass string) (string, error) {
-	return "", fmt.Errorf("not supported on VirtualBox — use SSH")
+	return "", fmt.Errorf("not supported on VirtualBox - use SSH")
 }
 
 func (v *VBoxBackend) RunGuestProgram(vmxPath, user, pass, adminUser, adminPass, program string, args ...string) (string, error) {
-	return "", fmt.Errorf("not supported on VirtualBox — use SSH")
+	return "", fmt.Errorf("not supported on VirtualBox - use SSH")
 }
 
 func (v *VBoxBackend) CopyFileFromGuest(vmxPath, user, pass, adminUser, adminPass, guestPath, hostPath string) error {
-	return fmt.Errorf("not supported on VirtualBox — use SSH")
+	return fmt.Errorf("not supported on VirtualBox - use SSH")
 }
 
 func (v *VBoxBackend) DeleteFileInGuest(vmxPath, user, pass, adminUser, adminPass, guestPath string) error {
-	return fmt.Errorf("not supported on VirtualBox — use SSH")
+	return fmt.Errorf("not supported on VirtualBox - use SSH")
 }
 
 func (v *VBoxBackend) ListGuestProcesses(vmxPath, user, pass, adminUser, adminPass string) error {
-	return fmt.Errorf("not supported on VirtualBox — use SSH")
+	return fmt.Errorf("not supported on VirtualBox - use SSH")
 }
 
 func (v *VBoxBackend) CreateSnapshot(vmxPath, name string) error {
@@ -360,7 +360,7 @@ func (v *VBoxBackend) ListSnapshots(vmxPath string) ([]string, error) {
 }
 
 func (v *VBoxBackend) FindOvftool() (string, error) {
-	return "", fmt.Errorf("ovftool not applicable for VirtualBox — use VBoxManage export/import")
+	return "", fmt.Errorf("ovftool not applicable for VirtualBox - use VBoxManage export/import")
 }
 
 func (v *VBoxBackend) ExportVM(vmxPath, destPath string) error {

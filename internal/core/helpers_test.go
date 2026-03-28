@@ -242,7 +242,7 @@ func TestMBtoKB(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// NIC type mapping — SetNICType
+// NIC type mapping - SetNICType
 // ---------------------------------------------------------------------------
 
 func TestSetNICType_Bridged(t *testing.T) {

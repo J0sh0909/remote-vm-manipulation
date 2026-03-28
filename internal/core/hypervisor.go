@@ -112,7 +112,7 @@ func NewHypervisor(s Settings, hvFlag string) (Hypervisor, error) {
 
 	switch len(detected) {
 	case 0:
-		return nil, fmt.Errorf("no hypervisor configured — check .env")
+		return nil, fmt.Errorf("no hypervisor configured - check .env")
 	case 1:
 		factory, ok := backendFactories[detected[0]]
 		if !ok {
@@ -120,7 +120,7 @@ func NewHypervisor(s Settings, hvFlag string) (Hypervisor, error) {
 		}
 		return factory(s)
 	default:
-		return nil, fmt.Errorf("multiple hypervisors detected (%s) — use --hv flag or set HYPERVISOR in .env", joinNames(detected))
+		return nil, fmt.Errorf("multiple hypervisors detected (%s) - use --hv flag or set HYPERVISOR in .env", joinNames(detected))
 	}
 }
 

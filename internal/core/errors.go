@@ -12,7 +12,7 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	// VM1xx — power operations
+	// VM1xx - power operations
 	ErrPower          = "VM100"
 	ErrStartFailed    = "VM101"
 	ErrStopFailed     = "VM102"
@@ -21,7 +21,7 @@ const (
 	ErrAlreadyRunning = "VM105"
 	ErrAlreadyStopped = "VM106"
 
-	// VM2xx — config operations
+	// VM2xx - config operations
 	ErrConfig        = "VM200"
 	ErrCPUConfig     = "VM201"
 	ErrRAMConfig     = "VM202"
@@ -32,7 +32,7 @@ const (
 	ErrCDVDConfig    = "VM207"
 	ErrTPMConfig     = "VM208"
 
-	// VM3xx — exec/guest operations
+	// VM3xx - exec/guest operations
 	ErrExec             = "VM300"
 	ErrGuestOSNotDet    = "VM301"
 	ErrGuestCmd         = "VM302"
@@ -42,7 +42,7 @@ const (
 	ErrBootstrapLinux   = "VM306"
 	ErrBootstrapWindows = "VM307"
 
-	// VM4xx — snapshot operations
+	// VM4xx - snapshot operations
 	ErrSnapshot     = "VM400"
 	ErrSnapCreate   = "VM401"
 	ErrSnapRevert   = "VM402"
@@ -50,27 +50,27 @@ const (
 	ErrSnapNotFound = "VM404"
 	ErrSnapExists   = "VM405"
 
-	// VM5xx — archive operations
+	// VM5xx - archive operations
 	ErrArchive         = "VM500"
 	ErrExportFailed    = "VM501"
 	ErrImportFailed    = "VM502"
 	ErrOvftoolNotFound = "VM503"
 	ErrDiskConvert     = "VM504"
 
-	// VM6xx — environment/settings
+	// VM6xx - environment/settings
 	ErrEnvNotFound    = "VM600"
 	ErrMissingSetting = "VM601"
 	ErrInvalidPath    = "VM602"
 	ErrVmrunNotFound  = "VM603"
 
-	// VM7xx — file/VMX operations
+	// VM7xx - file/VMX operations
 	ErrVMXRead        = "VM700"
 	ErrVMXWrite       = "VM701"
 	ErrVMXKeyNotFound = "VM702"
 	ErrFileNotFound   = "VM703"
 	ErrPermDenied     = "VM704"
 
-	// VM8xx — AWS operations
+	// VM8xx - AWS operations
 	ErrAWS             = "VM800"
 	ErrAWSNotFound     = "VM801"
 	ErrAWSCreateFailed = "VM802"
@@ -78,7 +78,7 @@ const (
 	ErrAWSStopFailed   = "VM804"
 	ErrAWSTermFailed   = "VM805"
 
-	// VM9xx — migration operations
+	// VM9xx - migration operations
 	ErrMigration        = "VM900"
 	ErrDiskConvertMig   = "VM901"
 	ErrSourceNotFound   = "VM902"

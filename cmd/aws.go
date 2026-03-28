@@ -71,7 +71,7 @@ func awsKeyPath(keyName string) string {
 }
 
 // ---------------------------------------------------------------------------
-// State management — rift-state.json
+// State management - rift-state.json
 // ---------------------------------------------------------------------------
 
 // RiftState is the top-level state file structure.
@@ -241,7 +241,7 @@ var awsStartCmd = &cobra.Command{
 			if pub == "" {
 				pub = "(no public IP)"
 			}
-			fmt.Printf("%s → running — %s\n", id, pub)
+			fmt.Printf("%s → running - %s\n", id, pub)
 		}
 	},
 }
@@ -292,7 +292,7 @@ var awsCreateCmd = &cobra.Command{
 			instType = "t2.micro"
 		}
 
-		// 1. Key pair — reuse via --key or create new.
+		// 1. Key pair - reuse via --key or create new.
 		keyName := awsKeyFlag
 		pemPath := ""
 		if keyName != "" {

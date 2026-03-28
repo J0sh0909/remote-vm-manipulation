@@ -93,23 +93,23 @@ func (h *HyperVBackend) ResetVM(vmName string) error {
 }
 
 func (h *HyperVBackend) RunGuestCommand(vmName, user, pass, interpreter, script, adminUser, adminPass string) (string, error) {
-	return "", fmt.Errorf("guest operations not supported on Hyper-V — use PowerShell Direct or SSH")
+	return "", fmt.Errorf("guest operations not supported on Hyper-V - use PowerShell Direct or SSH")
 }
 
 func (h *HyperVBackend) RunGuestProgram(vmName, user, pass, adminUser, adminPass, program string, args ...string) (string, error) {
-	return "", fmt.Errorf("guest operations not supported on Hyper-V — use PowerShell Direct or SSH")
+	return "", fmt.Errorf("guest operations not supported on Hyper-V - use PowerShell Direct or SSH")
 }
 
 func (h *HyperVBackend) CopyFileFromGuest(vmName, user, pass, adminUser, adminPass, guestPath, hostPath string) error {
-	return fmt.Errorf("guest operations not supported on Hyper-V — use PowerShell Direct or SSH")
+	return fmt.Errorf("guest operations not supported on Hyper-V - use PowerShell Direct or SSH")
 }
 
 func (h *HyperVBackend) DeleteFileInGuest(vmName, user, pass, adminUser, adminPass, guestPath string) error {
-	return fmt.Errorf("guest operations not supported on Hyper-V — use PowerShell Direct or SSH")
+	return fmt.Errorf("guest operations not supported on Hyper-V - use PowerShell Direct or SSH")
 }
 
 func (h *HyperVBackend) ListGuestProcesses(vmName, user, pass, adminUser, adminPass string) error {
-	return fmt.Errorf("guest operations not supported on Hyper-V — use PowerShell Direct or SSH")
+	return fmt.Errorf("guest operations not supported on Hyper-V - use PowerShell Direct or SSH")
 }
 
 func (h *HyperVBackend) CreateSnapshot(vmName, name string) error {

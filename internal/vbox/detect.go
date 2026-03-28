@@ -11,7 +11,7 @@ import (
 func DetectVBoxVMs() ([]VBoxVM, error) {
 	vboxPath, err := exec.LookPath("VBoxManage")
 	if err != nil {
-		return nil, nil // not installed — skip silently
+		return nil, nil // not installed - skip silently
 	}
 
 	out, err := exec.Command(vboxPath, "list", "vms").Output()

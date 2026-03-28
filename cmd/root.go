@@ -118,7 +118,7 @@ func exitOnErr(err error) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: power-off gate — skips VM and prints message if running and required
+// Helper: power-off gate - skips VM and prints message if running and required
 // ---------------------------------------------------------------------------
 
 func requireOff(vm core.VM, action string) bool {
@@ -150,7 +150,7 @@ func runPowerParallel(targets []core.VM, action func(core.VM) powerResult) {
 
 	// Run all targets in parallel, then silently retry failures up to 3
 	// attempts total. VMware's vmrun intermittently returns 0xffffffff when
-	// too many calls run concurrently — retries resolve this without
+	// too many calls run concurrently - retries resolve this without
 	// limiting parallelism.
 	results := runPowerBatch(targets, action)
 	for attempt := 1; attempt < 3; attempt++ {
@@ -465,7 +465,7 @@ var infoCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// Power commands — all follow the same pattern via ResolveTargets
+// Power commands - all follow the same pattern via ResolveTargets
 // ---------------------------------------------------------------------------
 
 var startCmd = &cobra.Command{
@@ -769,10 +769,10 @@ var execCmd = &cobra.Command{
 				interpreter, ok = core.DefaultInterpreter(guestOS)
 				if !ok {
 					if guestOS == "" {
-						core.LogError(core.ErrGuestOSNotDet, vm.Name, "guest OS not set — use \"rift config os %s --set <guestOS>\" or specify --interpreter manually", vm.Name)
+						core.LogError(core.ErrGuestOSNotDet, vm.Name, "guest OS not set - use \"rift config os %s --set <guestOS>\" or specify --interpreter manually", vm.Name)
 						return result{vm.Name, ""}
 					}
-					core.LogError(core.ErrGuestOSNotDet, vm.Name, "unknown guest OS %q — specify --interpreter manually", guestOS)
+					core.LogError(core.ErrGuestOSNotDet, vm.Name, "unknown guest OS %q - specify --interpreter manually", guestOS)
 					return result{vm.Name, ""}
 				}
 			}
@@ -906,7 +906,7 @@ func bootstrapRunLinux(vm core.VM, user, pass, linuxInner, successMsg string) po
 }
 
 // bootstrapWindowsCreate provisions the runner user on a Windows guest using
-// pure cmd.exe commands — no PowerShell or script download required.
+// pure cmd.exe commands - no PowerShell or script download required.
 func bootstrapWindowsCreate(vm core.VM, user, pass, ru, rp string) powerResult {
 	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add`); err != nil {
 		return powerResult{vm.Name, core.ErrBootstrapWindows, "create user failed: " + err.Error()}
@@ -933,7 +933,7 @@ func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	allOK := true
 
 	// Check 1: user exists.
-	// >nul 2>&1 is required — runProgramInGuest returns bogus exit codes
+	// >nul 2>&1 is required - runProgramInGuest returns bogus exit codes
 	// when commands produce console output.
 	if winCmd(vm, user, pass, `net user `+ru+` >nul 2>&1`) == nil {
 		fmt.Printf("[%s]   [OK]   user '%s' exists\n", vm.Name, ru)
@@ -943,7 +943,7 @@ func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	}
 
 	// Check 2: user is in the local Administrators group.
-	// Search for "Administ" — common prefix across locales (EN/FR/DE/ES).
+	// Search for "Administ" - common prefix across locales (EN/FR/DE/ES).
 	// Fallback: list the group directly by English or French name.
 	inAdmin := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Administ`) == nil
 	if !inAdmin {
@@ -1002,7 +1002,7 @@ func bootstrapWindowsRevoke(vm core.VM, user, pass, ru string) powerResult {
 	return powerResult{vm.Name, "", "revoke complete"}
 }
 
-// bootstrapAdminAuth resolves guest credentials from flags only — no .env fallback.
+// bootstrapAdminAuth resolves guest credentials from flags only - no .env fallback.
 // Use this for operations that must run as an admin (create, revoke).
 func bootstrapAdminAuth(userFlag, passFlag string) (user, pass string, ok bool) {
 	if userFlag == "" || passFlag == "" {
@@ -1088,7 +1088,7 @@ var bootstrapCreateCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsCreate(vm, user, pass, ru, rp)
@@ -1123,7 +1123,7 @@ var bootstrapVerifyCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
 			}
 			isWin := strings.HasPrefix(strings.ToLower(guestOS), "windows")
 			var r powerResult
@@ -1139,7 +1139,7 @@ var bootstrapVerifyCmd = &cobra.Command{
 				return r
 			}
 			if runnerUser == "" || runnerPass == "" {
-				return powerResult{vm.Name, "", "verify passed (runner auth skipped — VM_DEFAULT_USER/VM_DEFAULT_PASS not set)"}
+				return powerResult{vm.Name, "", "verify passed (runner auth skipped - VM_DEFAULT_USER/VM_DEFAULT_PASS not set)"}
 			}
 			var authErr error
 			if isWin {
@@ -1152,7 +1152,7 @@ var bootstrapVerifyCmd = &cobra.Command{
 			if authErr == nil {
 				return powerResult{vm.Name, "", "verify passed (runner auth OK)"}
 			}
-			return powerResult{vm.Name, "", "verify passed (runner auth failed — check password)"}
+			return powerResult{vm.Name, "", "verify passed (runner auth failed - check password)"}
 		})
 	},
 }
@@ -1181,7 +1181,7 @@ var bootstrapResetCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsReset(vm, user, pass, ru, rp)
@@ -1212,7 +1212,7 @@ var bootstrapRevokeCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsRevoke(vm, user, pass, ru)
@@ -1266,7 +1266,7 @@ var snapshotCreateCmd = &cobra.Command{
 			}
 
 			if wasRunning {
-				core.LogInfo(vm.Name, "running — suspending before snapshot")
+				core.LogInfo(vm.Name, "running - suspending before snapshot")
 				if err := hv.SuspendVM(vm.Path); err != nil {
 					core.LogError(core.ErrSuspendFailed, vm.Name, "%s", err)
 					continue
@@ -1540,7 +1540,7 @@ var archiveExportCmd = &cobra.Command{
 				folderPart = ""
 			}
 			// Determine hypervisor identifier for archive naming.
-			hvID := "vmw" // default — VMware Workstation
+			hvID := "vmw" // default - VMware Workstation
 			if settings.Hypervisor == "proxmox" {
 				hvID = "pve"
 			}
@@ -2041,7 +2041,7 @@ var configCpuCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// config ram — GB input, stored as MB in VMX
+// config ram - GB input, stored as MB in VMX
 // ---------------------------------------------------------------------------
 
 var configRamCmd = &cobra.Command{
@@ -2081,7 +2081,7 @@ var configRamCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// config display — gfxmem takes MB, stored as KB
+// config display - gfxmem takes MB, stored as KB
 // ---------------------------------------------------------------------------
 
 var configDisplayCmd = &cobra.Command{
@@ -2161,7 +2161,7 @@ var configOsCmd = &cobra.Command{
 			} else {
 				guestOS := core.GetGuestOS(vm.Path)
 				if guestOS == "" {
-					fmt.Printf("%s → guestOS: (not set) — use \"rift config os %s --set <guestOS>\" to set it\n", vm.Name, vm.Name)
+					fmt.Printf("%s → guestOS: (not set) - use \"rift config os %s --set <guestOS>\" to set it\n", vm.Name, vm.Name)
 				} else {
 					fmt.Printf("%s → guestOS: %s\n", vm.Name, guestOS)
 				}
@@ -2361,7 +2361,7 @@ var configNicCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// config disk — subcommands
+// config disk - subcommands
 // ---------------------------------------------------------------------------
 
 var configDiskCmd = &cobra.Command{
@@ -2533,7 +2533,7 @@ var isosCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// config cdrom — subcommands
+// config cdrom - subcommands
 // ---------------------------------------------------------------------------
 
 var configCdromCmd = &cobra.Command{
@@ -2627,7 +2627,7 @@ var configCdromBootCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// hwinfo — show detected host resources
+// hwinfo - show detected host resources
 // ---------------------------------------------------------------------------
 
 var hwinfoCmd = &cobra.Command{
@@ -2876,7 +2876,7 @@ func init() {
 	// Hypervisor backend override (global)
 	rootCmd.PersistentFlags().StringVar(&hvFlag, "hv", "", "Hypervisor backend: workstation, vbox, hyperv, proxmox (overrides .env and auto-detection)")
 
-	// Bootstrap — persistent flags shared by all subcommands
+	// Bootstrap - persistent flags shared by all subcommands
 	bootstrapCmd.PersistentFlags().StringVarP(&bootstrapUserFlag, "user", "u", "", "Guest OS username with admin/root privileges")
 	bootstrapCmd.PersistentFlags().StringVarP(&bootstrapPassFlag, "pass", "p", "", "Guest OS password")
 	bootstrapCmd.PersistentFlags().StringVar(&bootstrapRunnerUserFlag, "runner-user", "", "Automation username to act on (default: runner)")

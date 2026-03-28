@@ -41,7 +41,7 @@ func findQemuImg() (string, error) {
 	}
 	p, err := exec.LookPath("qemu-img")
 	if err != nil {
-		return "", fmt.Errorf("qemu-img not found — set QEMU_IMG_PATH in .env or add to PATH")
+		return "", fmt.Errorf("qemu-img not found - set QEMU_IMG_PATH in .env or add to PATH")
 	}
 	return p, nil
 }
