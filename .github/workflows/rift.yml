@@ -1,12 +1,11 @@
 name: rift
-
 on:
   push:
     branches: [dev]
   workflow_dispatch:
     inputs:
       command:
-        description: 'rift command'
+        description: 'rift command (e.g. overview, list, start MyVM)'
         required: true
         type: string
 
@@ -24,6 +23,8 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build -o C:\actions-runner\rift.exe .
+      # Copy to strong's persistent location
+      - run: copy rift.exe C:\actions-runner\rift.exe
       - uses: actions/upload-artifact@v4
         with:
           name: rift-binary
