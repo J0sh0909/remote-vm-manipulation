@@ -22,13 +22,21 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
-      - run: go build -o C:\actions-runner\rift.exe .
-      # Copy to strong's persistent location
-      - run: copy rift.exe C:\actions-runner\rift.exe
+      - run: go build -o rift.exe .
       - uses: actions/upload-artifact@v4
         with:
           name: rift-binary
-          path: C:\actions-runner\rift.exe
+          path: rift.exe
+
+  distribute-strong:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: [self-hosted, strong]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rift-binary
+      - run: copy rift.exe C:\actions-runner\rift.exe
 
   distribute-weak:
     if: github.event_name == 'push'
