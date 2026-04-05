@@ -1,3 +1,6 @@
+Here's the updated workflow with the fix so `strong` also gets the updated binary:
+
+```yaml
 name: rift
 on:
   push:
@@ -23,6 +26,8 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build -o C:\actions-runner\rift.exe .
+      # Copy to strong's persistent location
+      - run: copy rift.exe C:\actions-runner\rift.exe
       - uses: actions/upload-artifact@v4
         with:
           name: rift-binary
@@ -74,3 +79,8 @@ jobs:
       RUNNER_TRACKING_ID: ""
     steps:
       - run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
+```
+
+**Key change:** Added `- run: copy rift.exe C:\actions-runner\rift.exe` in the `build` job. This ensures that after compilation, `strong` immediately has the updated binary in its persistent location.
+
+Now all 3 machines (`strong`, `weak`, and `tank`) will have the same up-to-date binary after a push event.
