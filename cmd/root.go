@@ -1000,6 +1000,15 @@ func bootstrapWindowsCreate(vm core.VM, user, pass, ru, rp string) powerResult {
 func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	allOK := true
 
+	// Unlock check: ensure account is not locked.
+	// Windows locks accounts after failed auth attempts.
+	// Check if account is locked and unlock it.
+	locked := winCmd(vm, user, pass, `net user `+ru+` | findstr /C:"Compte.*: actif.*Non" /C:"Account active.*No" /C:"Account active.*Locked"`) == nil
+	if locked {
+		winCmd(vm, user, pass, `net user `+ru+` /active:yes`)
+		fmt.Printf("[%s]   [UNLOCK] unlocked locked account\n", vm.Name)
+	}
+
 	// Check 1: user exists.
 	// >nul 2>&1 is required - runProgramInGuest returns bogus exit codes
 	// when commands produce console output.
