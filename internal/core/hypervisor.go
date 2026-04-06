@@ -1,5 +1,6 @@
 package core
 
+// Test commit to trigger CI after adding new file.
 import (
 	"fmt"
 	"os"
