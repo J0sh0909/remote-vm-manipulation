@@ -22,11 +22,19 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
-      - run: go build -o rift.exe .
+      - name: Build Windows Binary
+        run: go build -o rift.exe .
+      - name: Build Linux Binary
+        run: |
+          $env:GOOS="linux"
+          $env:GOARCH="amd64"
+          go build -o rift-linux .
       - uses: actions/upload-artifact@v4
         with:
           name: rift-binary
-          path: rift.exe
+          path: |
+            rift.exe
+            rift-linux
 
   distribute-strong:
     if: github.event_name == 'push'
@@ -36,7 +44,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: rift-binary
-      - run: copy rift.exe C:\actions-runner\rift.exe
+      - run: |
+          copy rift.exe C:\actions-runner\rift.exe
+          copy rift-linux C:\actions-runner\rift-linux
 
   distribute-weak:
     if: github.event_name == 'push'
@@ -46,7 +56,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: rift-binary
-      - run: copy rift.exe C:\actions-runner\rift.exe
+      - run: |
+          copy rift.exe C:\actions-runner\rift.exe
+          copy rift-linux C:\actions-runner\rift-linux
 
   distribute-tank:
     if: github.event_name == 'push'
@@ -56,7 +68,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: rift-binary
-      - run: copy rift.exe C:\actions-runner\rift.exe
+      - run: |
+          copy rift.exe C:\actions-runner\rift.exe
+          copy rift-linux C:\actions-runner\rift-linux
 
   command-strong:
     if: github.event_name == 'workflow_dispatch'

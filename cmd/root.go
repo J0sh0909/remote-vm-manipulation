@@ -976,27 +976,48 @@ func bootstrapRunLinux(vm core.VM, user, pass, linuxInner, successMsg string) po
 // bootstrapWindowsCreate provisions the runner user on a Windows guest using
 // pure cmd.exe commands - no PowerShell or script download required.
 func bootstrapWindowsCreate(vm core.VM, user, pass, ru, rp string) powerResult {
-	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add`); err != nil {
-		return powerResult{vm.Name, core.ErrBootstrapWindows, "create user failed: " + err.Error()}
-	}
-	// Add to local Administrators group; fall back to French locale name if needed.
-	if err := winCmd(vm, user, pass, `net localgroup Administrators `+ru+` /add`); err != nil {
-		if err2 := winCmd(vm, user, pass, `net localgroup Administrateurs `+ru+` /add`); err2 != nil {
-			return powerResult{vm.Name, core.ErrBootstrapWindows, "add to admin group failed: " + err.Error()}
+	// Check if user already exists
+	if err := winCmd(vm, user, pass, `net user `+ru+` >nul 2>&1`); err != nil {
+		// User doesn't exist, create it
+		if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add`); err != nil {
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "create user failed: " + err.Error()}
+		}
+	} else {
+		// User exists, just reset password
+		if err := winCmd(vm, user, pass, `net user `+ru+` `+rp); err != nil {
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "reset password failed: " + err.Error()}
 		}
 	}
-	if err := winCmd(vm, user, pass, `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f`); err != nil {
-		return powerResult{vm.Name, core.ErrBootstrapWindows, "disable UAC failed: " + err.Error()}
+	
+	// Check if user is already in Administrators group
+	if err := winCmd(vm, user, pass, `net localgroup Administrators | findstr /c:"`+ru+`" >nul 2>&1`); err != nil {
+		// Not in English Administrators group, try to add
+		if err := winCmd(vm, user, pass, `net localgroup Administrators `+ru+` /add`); err != nil {
+			// Try French locale name if needed
+			if err2 := winCmd(vm, user, pass, `net localgroup Administrateurs `+ru+` /add`); err2 != nil {
+				return powerResult{vm.Name, core.ErrBootstrapWindows, "add to admin group failed: " + err.Error()}
+			}
+		}
 	}
-	if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' set PasswordExpires=FALSE`); err != nil {
-		return powerResult{vm.Name, core.ErrBootstrapWindows, "disable password expiry failed: " + err.Error()}
+	
+	// Disable UAC - use reg query first to check if already disabled
+	if err := winCmd(vm, user, pass, `reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA 2>&1 | findstr /c:"0x0" >nul`); err != nil {
+		// UAC not disabled, disable it
+		if err := winCmd(vm, user, pass, `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f`); err != nil {
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "disable UAC failed: " + err.Error()}
+		}
 	}
+	
+	// Disable password expiry - check first
+	if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' get PasswordExpires | findstr /c:"FALSE" >nul`); err != nil {
+		// Password expiry not disabled, disable it
+		if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' set PasswordExpires=FALSE`); err != nil {
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "disable password expiry failed: " + err.Error()}
+		}
+	}
+	
 	return powerResult{vm.Name, "", "bootstrap complete"}
 }
-
-// bootstrapWindowsVerify checks that the runner user is correctly provisioned
-// on a Windows guest using pure cmd.exe commands. Each check is printed inline
-// as [OK] or [FAIL]. Returns success only if all checks pass.
 func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	allOK := true
 
@@ -1165,13 +1186,20 @@ var bootstrapCreateCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			// Try to infer OS from VM name when VMX access fails
+			if strings.Contains(strings.ToLower(vm.Name), "-w-") {
+				guestOS = "windows"
+			} else if strings.Contains(strings.ToLower(vm.Name), "-u-") {
+				guestOS = "linux"
+			} else {
+return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsCreate(vm, user, pass, ru, rp)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/bootstrap/bootstrap-linux.sh -o /tmp/bootstrap.sh && chmod +x /tmp/bootstrap.sh && /tmp/bootstrap.sh `+ru+` "$RUNNER_PASS"`,
+				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER already exists'; else useradd -m -s /bin/bash '$RUNNER_USER'; echo 'Created user $RUNNER_USER'; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; if ! groups '$RUNNER_USER' | grep -q '\bsudo\b'; then usermod -aG sudo '$RUNNER_USER'; echo 'Added $RUNNER_USER to sudo group'; fi; echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-$RUNNER_USER; chmod 440 /etc/sudoers.d/99-$RUNNER_USER; chage -m 0 -M 99999 -I -1 -E -1 '$RUNNER_USER'; echo 'Bootstrap complete for $RUNNER_USER'"`,
 				"bootstrap complete",
 			)
 		})
@@ -1200,7 +1228,14 @@ var bootstrapVerifyCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			// Try to infer OS from VM name when VMX access fails
+			if strings.Contains(strings.ToLower(vm.Name), "-w-") {
+				guestOS = "windows"
+			} else if strings.Contains(strings.ToLower(vm.Name), "-u-") {
+				guestOS = "linux"
+			} else {
+return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			}
 			}
 			isWin := strings.HasPrefix(strings.ToLower(guestOS), "windows")
 			var r powerResult
@@ -1208,7 +1243,7 @@ var bootstrapVerifyCmd = &cobra.Command{
 				r = bootstrapWindowsVerify(vm, adminUser, adminPass, ru)
 			} else {
 				r = bootstrapRunLinux(vm, adminUser, adminPass,
-					`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-linux.sh -o /tmp/verify.sh && chmod +x /tmp/verify.sh && /tmp/verify.sh `+ru,
+					`bash -c "set -e; RUNNER_USER='`+ru+`'; if ! id '$RUNNER_USER' &>/dev/null; then echo '[FAIL] user \''$RUNNER_USER\'' does not exist'; exit 1; else echo '[OK] user \''$RUNNER_USER\'' exists'; fi; if ! groups '$RUNNER_USER' | grep -q '\bsudo\b'; then echo '[FAIL] user \''$RUNNER_USER\'' is not in sudo'; exit 1; else echo '[OK] user \''$RUNNER_USER\'' is in sudo'; fi; if [ ! -f /etc/sudoers.d/99-$RUNNER_USER ]; then echo '[FAIL] sudoers file not configured'; exit 1; else echo '[OK] sudoers file configured'; fi; echo 'Verify passed for $RUNNER_USER'"`,
 					"verify passed",
 				)
 			}
@@ -1258,13 +1293,20 @@ var bootstrapResetCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			// Try to infer OS from VM name when VMX access fails
+			if strings.Contains(strings.ToLower(vm.Name), "-w-") {
+				guestOS = "windows"
+			} else if strings.Contains(strings.ToLower(vm.Name), "-u-") {
+				guestOS = "linux"
+			} else {
+return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsReset(vm, user, pass, ru, rp)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/reset-password/reset-linux.sh -o /tmp/reset-password.sh && chmod +x /tmp/reset-password.sh && /tmp/reset-password.sh `+ru+` "$RUNNER_PASS"`,
+				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if ! id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER does not exist'; exit 1; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; echo 'Password reset for $RUNNER_USER'"`,
 				"password reset complete",
 			)
 		})
@@ -1289,13 +1331,20 @@ var bootstrapRevokeCmd = &cobra.Command{
 			}
 			guestOS := core.GetGuestOS(vm.Path)
 			if guestOS == "" {
-				return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			// Try to infer OS from VM name when VMX access fails
+			if strings.Contains(strings.ToLower(vm.Name), "-w-") {
+				guestOS = "windows"
+			} else if strings.Contains(strings.ToLower(vm.Name), "-u-") {
+				guestOS = "linux"
+			} else {
+return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift config os <name> --set <guestOS>"`}
+			}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
 				return bootstrapWindowsRevoke(vm, user, pass, ru)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/revoke/revoke-linux.sh -o /tmp/revoke.sh && chmod +x /tmp/revoke.sh && /tmp/revoke.sh `+ru,
+				`bash -c "set -e; RUNNER_USER='`+ru+`'; if id '$RUNNER_USER' &>/dev/null; then userdel -r '$RUNNER_USER' 2>/dev/null || userdel '$RUNNER_USER'; rm -f /etc/sudoers.d/99-$RUNNER_USER; echo 'User $RUNNER_USER revoked'; else echo 'User $RUNNER_USER does not exist'; fi"`,
 				"revoke complete",
 			)
 		})
