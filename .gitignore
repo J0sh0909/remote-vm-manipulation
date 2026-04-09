@@ -3,5 +3,6 @@
 rift.exe
 build.ps1
 todo.md
-roadmap.md.env.wsl
+roadmap.md
+.env.wsl
 rift-linux
