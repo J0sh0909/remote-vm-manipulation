@@ -116,7 +116,50 @@ func NewHypervisor(s Settings, hvFlag string) (Hypervisor, error) {
 		}
 		return factory(s)
 	default:
-		return nil, fmt.Errorf("multiple hypervisors detected (%s) - use --hv flag or set HYPERVISOR in .env", joinNames(detected))
+		// If multiple hypervisors are detected, try to find if only one has VMs.
+		// If so, use it implicitly. Otherwise, prompt the user to specify.
+		var vmsPerHypervisor = make(map[string][]VM)
+		for _, name := range detected {
+			factory, ok := backendFactories[name]
+			if !ok {
+				continue // Should not happen if detected correctly
+			}
+			hvInstance, err := factory(s)
+			if err != nil {
+				// Log the error but continue trying other backends
+				LogError(ErrHypervisorInit, name, "%s", err)
+				continue
+			}
+			vms, err := hvInstance.GetPowerState()
+			if err != nil {
+				// Log the error but continue trying other backends
+				LogError(ErrHypervisorInit, name, "%s", err)
+				continue
+			}
+			vmsPerHypervisor[name] = vms
+		}
+
+		var providersWithVMs []string
+		for name, vms := range vmsPerHypervisor {
+			if len(vms) > 0 {
+				providersWithVMs = append(providersWithVMs, name)
+			}
+		}
+
+		switch len(providersWithVMs) {
+		case 0:
+			return nil, fmt.Errorf("multiple hypervisors detected (%s), but none have VMs configured - use --hv flag or set HYPERVISOR in .env", joinNames(detected))
+		case 1:
+			provider := providersWithVMs[0]
+			factory, ok := backendFactories[provider]
+			if !ok {
+				return nil, fmt.Errorf("provider %q detected but not registered", provider) // Should not happen
+			}
+			LogInfo("Implicitly selected hypervisor", "%s (only one with VMs)", provider)
+			return factory(s)
+		default:
+			return nil, fmt.Errorf("multiple hypervisors detected (%s) with VMs configured - use --hv flag or set HYPERVISOR in .env", joinNames(providersWithVMs))
+		}
 	}
 }
 

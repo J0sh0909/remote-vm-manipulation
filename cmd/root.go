@@ -809,14 +809,19 @@ var execCmd = &cobra.Command{
 
 		user := execUserFlag
 		pass := execPassFlag
+		isImplicit := false
 		if user == "" {
 			user = settings.DefaultUser
+			if user == "" {
+				user = "runner"
+			}
+			isImplicit = true
 		}
 		if pass == "" {
 			pass = settings.DefaultPass
 		}
-		if user == "" || pass == "" {
-			fmt.Println("guest credentials required: use --user/--pass or set VM_DEFAULT_USER/VM_DEFAULT_PASS in .env")
+		if pass == "" {
+			fmt.Println("guest password required: use --pass or set VM_DEFAULT_PASS in .env")
 			return
 		}
 
@@ -851,7 +856,11 @@ var execCmd = &cobra.Command{
 			if isWindows {
 				guestOutputPath := `C:\Windows\Temp\rift-exec-output.txt`
 				if _, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\rift-exec-output.txt`); err != nil {
-					core.LogError(core.ErrGuestCmd, vm.Name, "%s", err)
+					if isImplicit && (strings.Contains(err.Error(), "Authentication failure") || strings.Contains(err.Error(), "Invalid user name") || strings.Contains(err.Error(), "incorrect")) {
+						core.LogError(core.ErrGuestCmd, vm.Name, "auth failed for '%s'. Run 'rift bootstrap create %s' or specify --user/--pass", user, vm.Name)
+					} else {
+						core.LogError(core.ErrGuestCmd, vm.Name, "%s", err)
+					}
 					return result{vm.Name, ""}
 				}
 
@@ -884,7 +893,11 @@ var execCmd = &cobra.Command{
 			guestOutputPath := "/tmp/rift-exec-output.txt"
 			wrappedScript := script + " > /tmp/rift-exec-output.txt 2>&1"
 			if _, err := hv.RunGuestCommand(vm.Path, user, pass, interpreter, wrappedScript, "", ""); err != nil {
-				core.LogError(core.ErrGuestCmd, vm.Name, "%s", err)
+				if isImplicit && (strings.Contains(err.Error(), "Authentication failure") || strings.Contains(err.Error(), "Invalid user name") || strings.Contains(err.Error(), "incorrect")) {
+					core.LogError(core.ErrGuestCmd, vm.Name, "auth failed for '%s'. Run 'rift bootstrap create %s' or specify --user/--pass", user, vm.Name)
+				} else {
+					core.LogError(core.ErrGuestCmd, vm.Name, "%s", err)
+				}
 				return result{vm.Name, ""}
 			}
 
@@ -958,17 +971,81 @@ var execCmd = &cobra.Command{
 // winCmd runs a single cmd.exe /c command in a Windows guest and returns any error.
 // The caller's user/pass are assumed to be admin-level; no hostname retry fallback.
 func winCmd(vm core.VM, user, pass, arg string) error {
-	_, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+arg)
+	output, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+arg)
+	if err != nil {
+		lowerOutput := strings.ToLower(output)
+		// Check for password complexity errors
+		if strings.Contains(lowerOutput, "password does not meet complexity requirements") || 
+		   strings.Contains(lowerOutput, "le mot de passe ne respecte pas") || 
+		   strings.Contains(lowerOutput, "complexit�") {
+			return fmt.Errorf("password rejected by Windows GPO: %w", err)
+		}
+		// Check for other common Windows errors
+		if strings.Contains(lowerOutput, "access is denied") || 
+		   strings.Contains(lowerOutput, "acc�s refus�") {
+			return fmt.Errorf("access denied (check UAC/privileges): %w", err)
+		}
+	}
 	return err
+}
+
+// validateWindowsPassword checks if a password meets basic Windows complexity requirements
+func validateWindowsPassword(password string) error {
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
+	
+	hasUpper := false
+	hasLower := false
+	hasDigit := false
+	hasSpecial := false
+	
+	for _, ch := range password {
+		if 'A' <= ch && ch <= 'Z' {
+			hasUpper = true
+		} else if 'a' <= ch && ch <= 'z' {
+			hasLower = true
+		} else if '0' <= ch && ch <= '9' {
+			hasDigit = true
+		} else if ch < 128 && !(('A' <= ch && ch <= 'Z') || ('a' <= ch && ch <= 'z') || ('0' <= ch && ch <= '9')) {
+			hasSpecial = true
+		}
+	}
+	
+	if !hasUpper {
+		return fmt.Errorf("password must contain at least one uppercase letter")
+	}
+	if !hasLower {
+		return fmt.Errorf("password must contain at least one lowercase letter")
+	}
+	if !hasDigit {
+		return fmt.Errorf("password must contain at least one digit")
+	}
+	if !hasSpecial {
+		return fmt.Errorf("password must contain at least one special character")
+	}
+	
+	// Check for common weak passwords
+	weakPasswords := []string{"password", "123456", "qwerty", "admin", "welcome"}
+	lowerPass := strings.ToLower(password)
+	for _, weak := range weakPasswords {
+		if strings.Contains(lowerPass, weak) {
+			return fmt.Errorf("password contains common weak pattern")
+		}
+	}
+	
+	return nil
 }
 
 // bootstrapRunLinux executes an inline bash command on a Linux guest via sudo.
 // The caller is responsible for checking vm.Running and guestOS before calling.
 // linuxInner is the command string run inside sudo -S bash -c '...'.
 func bootstrapRunLinux(vm core.VM, user, pass, linuxInner, successMsg string) powerResult {
-	if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash",
-		`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`, "", ""); err != nil {
-		return powerResult{vm.Name, core.ErrBootstrapLinux, "failed: " + err.Error()}
+	script := `echo '` + pass + `' | sudo -S bash << 'EOF_RIFT'
+` + linuxInner + `
+EOF_RIFT`
+	if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash", script, "", ""); err != nil {
+		return powerResult{vm.Name, core.ErrBootstrapLinux, "failed (check sudo access or script syntax): " + err.Error()}
 	}
 	return powerResult{vm.Name, "", successMsg}
 }
@@ -976,16 +1053,22 @@ func bootstrapRunLinux(vm core.VM, user, pass, linuxInner, successMsg string) po
 // bootstrapWindowsCreate provisions the runner user on a Windows guest using
 // pure cmd.exe commands - no PowerShell or script download required.
 func bootstrapWindowsCreate(vm core.VM, user, pass, ru, rp string) powerResult {
+	// Validate password meets basic Windows complexity requirements
+	if err := validateWindowsPassword(rp); err != nil {
+		return powerResult{vm.Name, core.ErrBootstrapWindows, 
+			fmt.Sprintf("password validation failed: %s. Use a stronger password (14+ chars, upper/lower/digit/special)", err)}
+	}
+	
 	// Check if user already exists
 	if err := winCmd(vm, user, pass, `net user `+ru+` >nul 2>&1`); err != nil {
 		// User doesn't exist, create it
-		if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add`); err != nil {
-			return powerResult{vm.Name, core.ErrBootstrapWindows, "create user failed: " + err.Error()}
+		if err := winCmd(vm, user, pass, `net user `+ru+` "`+rp+`" /add`); err != nil {
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "create user failed (check Windows GPO password complexity requirements): " + err.Error()}
 		}
 	} else {
 		// User exists, just reset password
-		if err := winCmd(vm, user, pass, `net user `+ru+` `+rp); err != nil {
-			return powerResult{vm.Name, core.ErrBootstrapWindows, "reset password failed: " + err.Error()}
+		if err := winCmd(vm, user, pass, `net user `+ru+` "`+rp+`"`); err != nil {
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "reset password failed (check Windows GPO password complexity requirements): " + err.Error()}
 		}
 	}
 	
@@ -1003,15 +1086,22 @@ func bootstrapWindowsCreate(vm core.VM, user, pass, ru, rp string) powerResult {
 	// Disable UAC - use reg query first to check if already disabled
 	if err := winCmd(vm, user, pass, `reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA 2>&1 | findstr /c:"0x0" >nul`); err != nil {
 		// UAC not disabled, disable it
-		if err := winCmd(vm, user, pass, `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f`); err != nil {
+		if err := winCmd(vm, user, pass, `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f >nul 2>&1`); err != nil {
 			return powerResult{vm.Name, core.ErrBootstrapWindows, "disable UAC failed: " + err.Error()}
+		}
+	}
+
+	// Disable remote UAC token filtering (allows elevated execution via vmrun without full UAC disable/reboot)
+	if err := winCmd(vm, user, pass, `reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v LocalAccountTokenFilterPolicy 2>&1 | findstr /c:"0x1" >nul`); err != nil {
+		if err := winCmd(vm, user, pass, `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v LocalAccountTokenFilterPolicy /t REG_DWORD /d 1 /f >nul 2>&1`); err != nil {
+			return powerResult{vm.Name, core.ErrBootstrapWindows, "disable remote UAC token filtering failed: " + err.Error()}
 		}
 	}
 	
 	// Disable password expiry - check first
-	if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' get PasswordExpires | findstr /c:"FALSE" >nul`); err != nil {
+	if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' get PasswordExpires 2>&1 | findstr /c:"FALSE" >nul`); err != nil {
 		// Password expiry not disabled, disable it
-		if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' set PasswordExpires=FALSE`); err != nil {
+		if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' set PasswordExpires=FALSE >nul 2>&1`); err != nil {
 			return powerResult{vm.Name, core.ErrBootstrapWindows, "disable password expiry failed: " + err.Error()}
 		}
 	}
@@ -1024,9 +1114,9 @@ func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	// Unlock check: ensure account is not locked.
 	// Windows locks accounts after failed auth attempts.
 	// Check if account is locked and unlock it.
-	locked := winCmd(vm, user, pass, `net user `+ru+` | findstr /R "Compte.*: actif.*Non\|Account active.*No\|Account active.*Locked"`) == nil
+	locked := winCmd(vm, user, pass, `net user `+ru+` | findstr /R "Compte.*: actif.*Non\|Account active.*No\|Account active.*Locked" >nul 2>&1`) == nil
 	if locked {
-		winCmd(vm, user, pass, `net user `+ru+` /active:yes`)
+		winCmd(vm, user, pass, `net user `+ru+` /active:yes >nul 2>&1`)
 		fmt.Printf("[%s]   [UNLOCK] unlocked locked account\n", vm.Name)
 	}
 
@@ -1043,12 +1133,12 @@ func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	// Check 2: user is in the local Administrators group.
 	// Search for "Administ" - common prefix across locales (EN/FR/DE/ES).
 	// Fallback: list the group directly by English or French name.
-	inAdmin := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Administ`) == nil
+	inAdmin := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Administ >nul 2>&1`) == nil
 	if !inAdmin {
-		inAdmin = winCmd(vm, user, pass, `net localgroup Administrators | findstr /I `+ru) == nil
+		inAdmin = winCmd(vm, user, pass, `net localgroup Administrators | findstr /I "`+ru+`" >nul 2>&1`) == nil
 	}
 	if !inAdmin {
-		inAdmin = winCmd(vm, user, pass, `net localgroup Administrateurs | findstr /I `+ru) == nil
+		inAdmin = winCmd(vm, user, pass, `net localgroup Administrateurs | findstr /I "`+ru+`" >nul 2>&1`) == nil
 	}
 	if inAdmin {
 		fmt.Printf("[%s]   [OK]   user '%s' is in Administrators\n", vm.Name, ru)
@@ -1058,7 +1148,7 @@ func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 	}
 
 	// Check 3: UAC disabled (EnableLUA = 0x0).
-	if winCmd(vm, user, pass, `reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA | findstr 0x0`) == nil {
+	if winCmd(vm, user, pass, `reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA | findstr 0x0 >nul 2>&1`) == nil {
 		fmt.Printf("[%s]   [OK]   UAC is disabled\n", vm.Name)
 	} else {
 		fmt.Printf("[%s]   [FAIL] UAC is not disabled\n", vm.Name)
@@ -1067,9 +1157,9 @@ func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 
 	// Check 4: password expiry disabled.
 	// "net user <name>" shows "Jamais" (FR) or "Never" (EN) when expiry is off.
-	noExpiry := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Jamais`) == nil
+	noExpiry := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Jamais >nul 2>&1`) == nil
 	if !noExpiry {
-		noExpiry = winCmd(vm, user, pass, `net user `+ru+` | findstr /I Never`) == nil
+		noExpiry = winCmd(vm, user, pass, `net user `+ru+` | findstr /I Never >nul 2>&1`) == nil
 	}
 	if noExpiry {
 		fmt.Printf("[%s]   [OK]   password expiry disabled\n", vm.Name)
@@ -1086,7 +1176,7 @@ func bootstrapWindowsVerify(vm core.VM, user, pass, ru string) powerResult {
 
 // bootstrapWindowsReset sets a new password for the runner user on a Windows guest.
 func bootstrapWindowsReset(vm core.VM, user, pass, ru, rp string) powerResult {
-	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp); err != nil {
+	if err := winCmd(vm, user, pass, `net user `+ru+` "`+rp+`"`); err != nil {
 		return powerResult{vm.Name, core.ErrBootstrapWindows, "password reset failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", "password reset complete"}
@@ -1133,8 +1223,21 @@ func bootstrapEffectiveRunnerUser() string {
 	if bootstrapRunnerUserFlag != "" {
 		return bootstrapRunnerUserFlag
 	}
+	if settings.DefaultUser != "" {
+		return settings.DefaultUser
+	}
 	return "runner"
 }
+func bootstrapEffectiveRunnerPass() (string, bool) {
+	if bootstrapRunnerPassFlag != "" {
+		return bootstrapRunnerPassFlag, true
+	}
+	if settings.DefaultPass != "" {
+		return settings.DefaultPass, true
+	}
+	return "", false
+}
+
 
 // bootstrapDispatch runs action for a single VM (inline) or all targets in parallel (folder mode).
 func bootstrapDispatch(targets []core.VM, action func(core.VM) powerResult) {
@@ -1166,19 +1269,19 @@ var bootstrapCreateCmd = &cobra.Command{
 	Use:   "create <target>",
 	Short: "Provision the automation user on a guest VM",
 	Run: func(cmd *cobra.Command, args []string) {
-		if bootstrapRunnerPassFlag == "" {
-			fmt.Fprintln(os.Stderr, "error: --runner-pass is required")
-			return
-		}
 		requireSettings()
 		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
-		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		user, pass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
 		ru := bootstrapEffectiveRunnerUser()
-		rp := bootstrapRunnerPassFlag
+		rp, rpOk := bootstrapEffectiveRunnerPass()
+		if !rpOk {
+			fmt.Fprintln(os.Stderr, "error: runner password required: use --runner-pass or set VM_DEFAULT_PASS in .env")
+			return
+		}
 		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
 		bootstrapDispatch(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
@@ -1196,10 +1299,13 @@ return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift
 			}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
+				if settings.Hypervisor == "workstation" {
+					return powerResult{vm.Name, core.ErrBootstrapWindows, fmt.Sprintf("Automated provisioning on %q is limited by VMware Tools authentication policy. Please manually create the user on the guest VM if this continues to fail.", settings.Hypervisor)}
+				}
 				return bootstrapWindowsCreate(vm, user, pass, ru, rp)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER already exists'; else useradd -m -s /bin/bash '$RUNNER_USER'; echo 'Created user $RUNNER_USER'; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; if ! groups '$RUNNER_USER' | grep -q '\bsudo\b'; then usermod -aG sudo '$RUNNER_USER'; echo 'Added $RUNNER_USER to sudo group'; fi; echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-$RUNNER_USER; chmod 440 /etc/sudoers.d/99-$RUNNER_USER; chage -m 0 -M 99999 -I -1 -E -1 '$RUNNER_USER'; echo 'Bootstrap complete for $RUNNER_USER'"`,
+				`RUNNER_PASS=$(echo `+b64rp+` | base64 --decode 2>/dev/null || echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER already exists'; else useradd -m -s /bin/bash '$RUNNER_USER'; echo 'Created user $RUNNER_USER'; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; if ! groups '$RUNNER_USER' | grep -q '\bsudo\b'; then usermod -aG sudo '$RUNNER_USER'; echo 'Added $RUNNER_USER to sudo group'; fi; echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-$RUNNER_USER; chmod 440 /etc/sudoers.d/99-$RUNNER_USER; chage -m 0 -M 99999 -I -1 -E -1 '$RUNNER_USER'; echo 'Bootstrap complete for $RUNNER_USER'"`,
 				"bootstrap complete",
 			)
 		})
@@ -1214,7 +1320,7 @@ var bootstrapVerifyCmd = &cobra.Command{
 		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
 		// Admin creds for system checks: --user/--pass → .env fallback.
-		adminUser, adminPass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		adminUser, adminPass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
@@ -1273,19 +1379,19 @@ var bootstrapResetCmd = &cobra.Command{
 	Use:   "reset <target>",
 	Short: "Reset the automation user password on a guest VM",
 	Run: func(cmd *cobra.Command, args []string) {
-		if bootstrapRunnerPassFlag == "" {
-			fmt.Fprintln(os.Stderr, "error: --runner-pass is required")
-			return
-		}
 		requireSettings()
 		targets, err := core.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
-		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		user, pass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
 		ru := bootstrapEffectiveRunnerUser()
-		rp := bootstrapRunnerPassFlag
+		rp, rpOk := bootstrapEffectiveRunnerPass()
+		if !rpOk {
+			fmt.Fprintln(os.Stderr, "error: runner password required: use --runner-pass or set VM_DEFAULT_PASS in .env")
+			return
+		}
 		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
 		bootstrapDispatch(targets, func(vm core.VM) powerResult {
 			if !vm.Running {
@@ -1303,10 +1409,13 @@ return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift
 			}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
+				if settings.Hypervisor == "workstation" {
+					return powerResult{vm.Name, core.ErrBootstrapWindows, fmt.Sprintf("Automated provisioning on %q is limited by VMware Tools authentication policy. Please manually create the user on the guest VM if this continues to fail.", settings.Hypervisor)}
+				}
 				return bootstrapWindowsReset(vm, user, pass, ru, rp)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if ! id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER does not exist'; exit 1; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; echo 'Password reset for $RUNNER_USER'"`,
+				`RUNNER_PASS=$(echo `+b64rp+` | base64 --decode 2>/dev/null || echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if ! id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER does not exist'; exit 1; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; echo 'Password reset for $RUNNER_USER'"`,
 				"password reset complete",
 			)
 		})
@@ -1341,6 +1450,9 @@ return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift
 			}
 			}
 			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
+				if settings.Hypervisor == "workstation" {
+					return powerResult{vm.Name, core.ErrBootstrapWindows, fmt.Sprintf("Automated provisioning on %q is limited by VMware Tools authentication policy. Please manually create the user on the guest VM if this continues to fail.", settings.Hypervisor)}
+				}
 				return bootstrapWindowsRevoke(vm, user, pass, ru)
 			}
 			return bootstrapRunLinux(vm, user, pass,

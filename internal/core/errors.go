@@ -77,6 +77,7 @@ const (
 	ErrAWSStartFailed  = "VM803"
 	ErrAWSStopFailed   = "VM804"
 	ErrAWSTermFailed   = "VM805"
+	ErrHypervisorInit  = "VM899"
 
 	// VM9xx - migration operations
 	ErrMigration        = "VM900"
