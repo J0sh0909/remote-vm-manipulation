@@ -1361,7 +1361,24 @@ return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift
 				r = bootstrapWindowsVerify(vm, adminUser, adminPass, ru)
 			} else {
 				r = bootstrapRunLinux(vm, adminUser, adminPass,
-					`bash -c "set -e; RUNNER_USER='`+ru+`'; if ! id '$RUNNER_USER' &>/dev/null; then echo '[FAIL] user \''$RUNNER_USER\'' does not exist'; exit 1; else echo '[OK] user \''$RUNNER_USER\'' exists'; fi; if ! groups '$RUNNER_USER' | grep -q '\bsudo\b'; then echo '[FAIL] user \''$RUNNER_USER\'' is not in sudo'; exit 1; else echo '[OK] user \''$RUNNER_USER\'' is in sudo'; fi; if [ ! -f /etc/sudoers.d/99-$RUNNER_USER ]; then echo '[FAIL] sudoers file not configured'; exit 1; else echo '[OK] sudoers file configured'; fi; echo 'Verify passed for $RUNNER_USER'"`,
+					`set -e
+RUNNER_USER='` + ru + `'
+if ! id "$RUNNER_USER" >/dev/null 2>&1; then
+  echo "[FAIL] user $RUNNER_USER does not exist"
+  exit 1
+fi
+echo "[OK] user $RUNNER_USER exists"
+if ! groups "$RUNNER_USER" | grep -qw sudo; then
+  echo "[FAIL] user $RUNNER_USER is not in sudo"
+  exit 1
+fi
+echo "[OK] user $RUNNER_USER is in sudo"
+if [ ! -f "/etc/sudoers.d/99-$RUNNER_USER" ]; then
+  echo "[FAIL] sudoers file not configured"
+  exit 1
+fi
+echo "[OK] sudoers file configured"
+echo "Verify passed for $RUNNER_USER"`,
 					"verify passed",
 				)
 			}
@@ -1427,7 +1444,15 @@ return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift
 				return bootstrapWindowsReset(vm, user, pass, ru, rp)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`RUNNER_PASS=$(echo `+b64rp+` | base64 --decode 2>/dev/null || echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if ! id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER does not exist'; exit 1; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; echo 'Password reset for $RUNNER_USER'"`,
+				`set -e
+RUNNER_USER='` + ru + `'
+RUNNER_PASS=$(echo ` + b64rp + ` | base64 -d)
+if ! id "$RUNNER_USER" >/dev/null 2>&1; then
+  echo "User $RUNNER_USER does not exist"
+  exit 1
+fi
+echo "$RUNNER_USER:$RUNNER_PASS" | chpasswd
+echo "Password reset for $RUNNER_USER"`,
 				"password reset complete",
 			)
 		})
@@ -1468,7 +1493,15 @@ return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift
 				return bootstrapWindowsRevoke(vm, user, pass, ru)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`bash -c "set -e; RUNNER_USER='`+ru+`'; if id '$RUNNER_USER' &>/dev/null; then userdel -r '$RUNNER_USER' 2>/dev/null || userdel '$RUNNER_USER'; rm -f /etc/sudoers.d/99-$RUNNER_USER; echo 'User $RUNNER_USER revoked'; else echo 'User $RUNNER_USER does not exist'; fi"`,
+				`set -e
+RUNNER_USER='` + ru + `'
+if id "$RUNNER_USER" >/dev/null 2>&1; then
+  userdel -r "$RUNNER_USER" 2>/dev/null || userdel "$RUNNER_USER"
+  rm -f "/etc/sudoers.d/99-$RUNNER_USER"
+  echo "User $RUNNER_USER revoked"
+else
+  echo "User $RUNNER_USER does not exist"
+fi`,
 				"revoke complete",
 			)
 		})
