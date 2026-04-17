@@ -1304,7 +1304,7 @@ return powerResult{vm.Name, core.ErrGuestOSNotDet, `guest OS not set - use "rift
 				return bootstrapWindowsCreate(vm, user, pass, ru, rp)
 			}
 			return bootstrapRunLinux(vm, user, pass,
-				`RUNNER_PASS=$(echo `+b64rp+` | base64 --decode 2>/dev/null || echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER already exists'; else useradd -m -s /bin/bash '$RUNNER_USER'; echo 'Created user $RUNNER_USER'; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; if ! groups '$RUNNER_USER' | grep -q '\bsudo\b'; then usermod -aG sudo '$RUNNER_USER'; echo 'Added $RUNNER_USER to sudo group'; fi; echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-$RUNNER_USER; chmod 440 /etc/sudoers.d/99-$RUNNER_USER; chage -m 0 -M 99999 -I -1 -E -1 '$RUNNER_USER'; echo 'Bootstrap complete for $RUNNER_USER'"`,
+				`RUNNER_PASS=$(echo `+b64rp+` | base64 --decode 2>/dev/null || echo `+b64rp+` | base64 -d) && bash -c "set -e; RUNNER_USER='`+ru+`'; RUNNER_PASS='$RUNNER_PASS'; if id '$RUNNER_USER' &>/dev/null; then echo 'User $RUNNER_USER already exists'; else useradd -m -s /bin/bash '$RUNNER_USER'; echo 'Created user $RUNNER_USER'; fi; echo '$RUNNER_USER:$RUNNER_PASS' | chpasswd; if ! groups '$RUNNER_USER' | grep -q '\bsudo\b'; then usermod -aG sudo '$RUNNER_USER'; echo 'Added $RUNNER_USER to sudo group'; fi; echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-$RUNNER_USER; chmod 440 /etc/sudoers.d/99-$RUNNER_USER; chage -m 0 -M 99999 -I -1 -E -1 '$RUNNER_USER' || true; echo 'Bootstrap complete for $RUNNER_USER'"`,
 				"bootstrap complete",
 			)
 		})
