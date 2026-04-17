@@ -1041,9 +1041,8 @@ func validateWindowsPassword(password string) error {
 // The caller is responsible for checking vm.Running and guestOS before calling.
 // linuxInner is the command string run inside sudo -S bash -c '...'.
 func bootstrapRunLinux(vm core.VM, user, pass, linuxInner, successMsg string) powerResult {
-	script := `echo '` + pass + `' | sudo -S bash << 'EOF_RIFT'
-` + linuxInner + `
-EOF_RIFT`
+	b64inner := base64.StdEncoding.EncodeToString([]byte(linuxInner))
+	script := `echo '` + pass + `' | sudo -S bash -c "echo ` + b64inner + ` | base64 -d | bash"`
 	if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash", script, "", ""); err != nil {
 		return powerResult{vm.Name, core.ErrBootstrapLinux, "failed (check sudo access or script syntax): " + err.Error()}
 	}
